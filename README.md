@@ -38,7 +38,7 @@ extraArgs = { ilandSrc = wwn-iland; };  # weston copies upstream/shims/* from he
 ```
 
 - `registryFragment.iland` - per-platform iland userland recipes (iOS family + macOS).
-- `registryFragment."iland-gl-clients"` - GL smoke clients (kmscube).
+- **kmscube** lives in [wwn-kmscube](https://github.com/Wawona/wwn-kmscube) (GL smoke test over this stack).
 - `dependencies/libs/iland/upstream/` - vendored upstream iland sources + DRM/EGL/GBM/udev shims that `wwn-weston` consumes via `ilandSrc`.
 
 ## Standalone build

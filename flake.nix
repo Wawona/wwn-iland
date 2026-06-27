@@ -36,11 +36,6 @@
           watchos = ./dependencies/libs/iland/watchos.nix;
           macos = ./dependencies/libs/iland/macos.nix;
         };
-        "iland-gl-clients" = withPlatformVariants {
-          android = null;
-          ios = ./dependencies/libs/iland/gl-clients-ios.nix;
-          macos = ./dependencies/libs/iland/gl-clients-macos.nix;
-        };
       };
 
       packages = forAll (system:
