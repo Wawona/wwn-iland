@@ -47,7 +47,7 @@ let
       ];
   cxxFlags =
     if angle != null && angleLinkKind != "dylib" then
-      [ "-lc++" "-lc++abi" ]
+      [ ]
     else
       [ ];
   platformSupportLibs = [
