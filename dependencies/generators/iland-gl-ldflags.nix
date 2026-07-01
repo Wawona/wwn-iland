@@ -30,9 +30,16 @@ let
       [ "-force_load" "${strip iland}/lib/libiland_userland.a" ]
     else
       [ ];
+  # Do not -force_load libkmscube.a beside static ANGLE: iOS 26 ld fails to resolve
+  # libc++ for libGLESv2.a when kmscube is force-loaded in the same link unit as
+  # WWNIlandPresenter.o. Archive pull via -lkmscube is enough (kmscube_main is referenced).
   kmscubeArchive =
     if forceLoad && kmscube != null then
-      [ "-force_load" "${strip kmscube}/lib/libkmscube.a" ]
+      [
+        "-L${strip kmscube}/lib"
+        "-Wl,-u,_kmscube_main"
+        "-lkmscube"
+      ]
     else
       [ ];
   angleFlags =
@@ -56,4 +63,4 @@ let
     "-liconv"
   ];
 in
-libPaths ++ ilandArchive ++ kmscubeArchive ++ angleFlags ++ cxxFlags ++ platformSupportLibs
+libPaths ++ ilandArchive ++ angleFlags ++ cxxFlags ++ platformSupportLibs ++ kmscubeArchive
