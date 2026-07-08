@@ -99,9 +99,10 @@ new_vimage = """    for (uint32_t y = 0; y < h; y++) {
             px[2] = r;
         }
     }"""
-if old_vimage not in text:
-    raise SystemExit("egl.c vImage anchor missing")
-text = text.replace(old_vimage, new_vimage, 1)
+count = text.count(old_vimage)
+if count < 1:
+    raise SystemExit(f"egl.c vImage anchor missing (found {count})")
+text = text.replace(old_vimage, new_vimage)
 old_egl = '    g_angle_handle = open_angle_library("/opt/local/lib/libEGL.dylib");'
 new_egl = """#if defined(__ANDROID__)
     g_angle_handle = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
@@ -177,6 +178,8 @@ PY
     cp shims/include/esUtil.h                        $out/include/ || true
     cp shims/drm/drm/include/drm.h                   $out/include/ || true
     cp shims/drm/drm/include/iland_present.h         $out/include/
+    # Consumed by Wawona's iland_presenter_android.c (JNI presenter bridge).
+    cp shims/include/iosurface_compat.h              $out/include/
 
     cp -r ${angle}/include/EGL/.   $out/include/EGL/
     cp -r ${angle}/include/GLES2/. $out/include/GLES2/

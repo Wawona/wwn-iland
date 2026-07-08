@@ -67,6 +67,16 @@ uint32_t ILandIOSurfaceGetID(IOSurfaceRef surf)
     return surf ? surf->id : 0;
 }
 
+uint32_t ILandIOSurfaceGetWidth(IOSurfaceRef surf)
+{
+    return surf ? surf->width : 0;
+}
+
+uint32_t ILandIOSurfaceGetHeight(IOSurfaceRef surf)
+{
+    return surf ? surf->height : 0;
+}
+
 size_t ILandIOSurfaceGetBytesPerRow(IOSurfaceRef surf)
 {
     return surf ? surf->stride : 0;
