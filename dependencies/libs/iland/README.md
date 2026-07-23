@@ -37,6 +37,9 @@ Wayland clients and Weston tools (e.g. `weston-simple-egl`, `kmscube`,
 - Mode A: the DRM page-flip present path (`shims/drm/.../drm.c` Mach IPC to
   `framebufferd`) is redirected to a Wawona in-window present callback instead of
   a privileged daemon.
+- Mode B dylib: built by [`macos-baremetal.nix`](./macos-baremetal.nix) →
+  `libwayland-mac.dylib` (CMake + Dobby). Shipped only in Wawona
+  `wawona-macos-desktop-host` under `Contents/Library/Wawona/iland/`.
 
 ## Sync workflow
 

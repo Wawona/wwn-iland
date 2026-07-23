@@ -77,6 +77,10 @@
           watchos = ./dependencies/libs/iland/watchos.nix;
           macos = ./dependencies/libs/iland/macos.nix;
         };
+        # Mode B dylib — macOS only (no mobile/Android variants).
+        iland-baremetal = withPlatformVariants {
+          macos = ./dependencies/libs/iland/macos-baremetal.nix;
+        };
       };
 
       packages = forAll (system:
@@ -96,6 +100,7 @@
         ((if isDarwin then {
           iland-ios = tc.buildForIOS "iland" { };
           iland-macos = tc.buildForMacOS "iland" { };
+          iland-baremetal-macos = tc.buildForMacOS "iland-baremetal" { };
         } else { }) // {
           iland-android = tc.buildForAndroid "iland" { };
         })

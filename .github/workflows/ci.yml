@@ -26,6 +26,7 @@ jobs:
         run: |
           nix eval --raw .#packages.aarch64-darwin.iland-macos.drvPath
           nix eval --raw .#packages.aarch64-darwin.iland-ios.drvPath
+          nix eval --raw .#packages.aarch64-darwin.iland-baremetal-macos.drvPath
 
   build:
     name: build iland
@@ -39,3 +40,20 @@ jobs:
       - uses: DeterminateSystems/flakehub-cache-action@v3
 
       - run: nix build .#packages.aarch64-darwin.iland-macos -L
+
+  build-baremetal:
+    name: build iland Mode B dylib
+    runs-on: macos-15
+    needs: eval
+    steps:
+      - uses: actions/checkout@v5
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          determinate: true
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - name: build libwayland-mac.dylib
+        run: |
+          nix build .#packages.aarch64-darwin.iland-baremetal-macos -L
+          test -f result/lib/libwayland-mac.dylib
+          file result/lib/libwayland-mac.dylib | grep -q 'Mach-O'

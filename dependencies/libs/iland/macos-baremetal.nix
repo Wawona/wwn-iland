@@ -1,0 +1,129 @@
+# iland Mode B — macOS-only WindowServer/SkyLight replacement dylib.
+#
+# Builds upstream libwayland-mac.dylib (Dobby hooks + embedded amfiexceptiond /
+# framebufferd / inputd). NOT App-Store-safe: requires SIP debugging
+# restrictions off (or SIP fully disabled), root for the constructor, and
+# private entitlements on the helper daemons.
+#
+# Consumed only by Wawona desktop-host / full-dev macOS packaging. Never built
+# for iOS/iPadOS/tvOS/watchOS/visionOS/Android.
+{
+  lib,
+  pkgs,
+  stdenv,
+  buildModule,
+  xcodeUtils,
+  ...
+}:
+
+let
+  angle = buildModule.buildForMacOS "angle" { };
+
+  # Pinned Dobby (upstream CMake FetchContent target). Keep in sync with
+  # CoreBedtime/iland's CMakeLists FetchContent_Declare(dobby …).
+  dobbySrc = pkgs.fetchFromGitHub {
+    owner = "jmpews";
+    repo = "Dobby";
+    rev = "5dfc8546954ce3b3198132ab13fddb89ee92cdd7";
+    sha256 = "0531k6r7knn30xb32rbri55d1k0rv1zjfqlcji66ms2m0ilj2g4x";
+  };
+in
+pkgs.stdenv.mkDerivation {
+  pname = "iland-baremetal";
+  version = "0.1.0";
+
+  src = ./upstream;
+
+  # Needs the macOS SDK + codesign for ad-hoc helper signing.
+  __noChroot = true;
+
+  nativeBuildInputs = [
+    pkgs.cmake
+    pkgs.ninja
+    pkgs.git
+  ];
+
+  postPatch = ''
+    # Skip upstream test/kmscube targets (MacPorts ANGLE paths; not needed for
+    # the product dylib).
+    substituteInPlace CMakeLists.txt \
+      --replace 'add_subdirectory(test)' '# add_subdirectory(test) # wwn-iland: skipped'
+
+    # De-MacPorts: EGL shim still embeds /opt/local candidates for the Mode B
+    # fallback GLES load path.
+    substituteInPlace shims/egl/src/egl.c \
+      --replace "/opt/local/lib/libEGL.dylib"    "${angle}/lib/libEGL.dylib" \
+      --replace "/opt/local/lib/libGLESv2.dylib" "${angle}/lib/libGLESv2.dylib"
+
+    # inputd CMake hardcodes /opt/local/include — drop it (IOKit headers are in SDK).
+    substituteInPlace shims/libinput/input-daemon/CMakeLists.txt \
+      --replace '/opt/local/include' '${angle}/include'
+  '';
+
+  dontConfigure = true;
+
+  buildPhase = ''
+    runHook preBuild
+
+    unset DEVELOPER_DIR
+    MACOS_SDK=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)
+    if [ ! -d "$MACOS_SDK" ]; then
+      MACOS_SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+    fi
+    if [ ! -d "$MACOS_SDK" ]; then
+      MACOS_SDK=$(${xcodeUtils.findXcodeScript}/bin/find-xcode)/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
+    fi
+    if [ ! -d "$MACOS_SDK" ]; then
+      echo "ERROR: MacOSX SDK not found." >&2
+      exit 1
+    fi
+    export SDKROOT="$MACOS_SDK"
+    export DEVELOPER_DIR="''${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
+
+    cmake -G Ninja -B build -S . \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_OSX_SYSROOT="$SDKROOT" \
+      -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+      -DFETCHCONTENT_SOURCE_DIR_DOBBY="${dobbySrc}" \
+      -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+      -DDobby_BUILD_TOOLS=OFF \
+      -DDobby_BUILD_TESTS=OFF
+
+    cmake --build build --parallel ''${NIX_BUILD_CORES:-4}
+
+    runHook postBuild
+  '';
+
+  installPhase = ''
+    mkdir -p $out/lib $out/nix-support
+    cp -L build/libwayland-mac.dylib $out/lib/libwayland-mac.dylib
+    chmod 755 $out/lib/libwayland-mac.dylib
+
+    # Convenience alias used by Wawona bundle layout docs.
+    ln -sf libwayland-mac.dylib $out/lib/libwwn-iland.dylib
+
+    echo "mode-b-baremetal" > $out/nix-support/iland-mode
+    echo "${angle}" > $out/nix-support/angle-path
+
+    cat > $out/nix-support/README.txt <<'EOF'
+    iland Mode B dylib (libwayland-mac.dylib).
+    Load via DYLD_INSERT_LIBRARIES into a root-launched weston --backend=drm
+    process when SIP allows debugging restrictions off and Desktop Replacement
+    is enabled. Never ship in App Store / store-safe builds.
+    EOF
+  '';
+
+  passthru = {
+    inherit angle dobbySrc;
+    dylibName = "libwayland-mac.dylib";
+  };
+
+  meta = with lib; {
+    description = "iland Mode B WindowServer-replacement dylib (Dobby + framebufferd) for macOS";
+    homepage = "https://github.com/Wawona/wwn-iland";
+    license = licenses.mit;
+    platforms = platforms.darwin;
+    # Intentionally not hydra-safe / store-safe.
+    broken = false;
+  };
+}

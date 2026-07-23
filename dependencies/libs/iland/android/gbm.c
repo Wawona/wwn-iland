@@ -281,8 +281,12 @@ uint32_t gbm_bo_get_offset(struct gbm_bo *bo, int plane)
 
 uint64_t gbm_bo_get_modifier(struct gbm_bo *bo)
 {
-    (void)bo;
-    return 0;
+    /* Wawona / wwn-waypipe IOSurface dmabuf convention (#86):
+     * high bit marks IOSurface import; low 63 bits carry IOSurfaceGetID. */
+    if (!bo || !bo->surface)
+        return 0;
+    uint64_t id = (uint64_t)IOSurfaceGetID(bo->surface);
+    return 0x8000000000000000ULL | (id & 0x7fffffffffffffffULL);
 }
 
 int gbm_device_get_fd(struct gbm_device *gbm)

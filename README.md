@@ -37,15 +37,34 @@ registry = wwn-toolchain.lib.baseRegistry // wwn-iland.registryFragment;
 extraArgs = { ilandSrc = wwn-iland; };  # weston copies upstream/shims/* from here
 ```
 
-- `registryFragment.iland` - per-platform iland userland recipes (iOS family + macOS).
+- `registryFragment.iland` — Mode A per-platform userland archives (iOS family +
+  macOS + Android). App-Store-safe in-window present.
+- `registryFragment.iland-baremetal` — **macOS only** Mode B
+  `libwayland-mac.dylib` (Dobby + embedded `framebufferd` / `inputd` /
+  `amfiexceptiond`). Desktop Replacement / WindowServer path. Never built for
+  iOS/iPadOS/tvOS/watchOS/visionOS/Android.
 - **kmscube** lives in [wwn-kmscube](https://github.com/Wawona/wwn-kmscube) (GL smoke test over this stack).
 - `dependencies/libs/iland/upstream/` - vendored upstream iland sources + DRM/EGL/GBM/udev shims that `wwn-weston` consumes via `ilandSrc`.
+
+## Mode A vs Mode B
+
+| | Mode A (default) | Mode B (desktop-host) |
+|---|---|---|
+| Artifact | `libiland_userland.a` | `libwayland-mac.dylib` |
+| Platforms | macOS, iOS/iPadOS/visionOS, Android; tvOS/watchOS stubs | **macOS only** |
+| Present | In-process `iland_drm_set_present_callback` | Mach IPC → `framebufferd` (SkyLight) |
+| SIP / root | Not required | SIP debugging off (or SIP disabled) + root |
+| App Store | Yes | No — Developer ID / desktop-host only |
+
+Wawona wires Mode B only when SIP allows (`WWNSipStatus`) **and** Settings →
+Desktop → Enable Desktop Replacement is on. Otherwise Mode A.
 
 ## Standalone build
 
 ```sh
-nix build .#iland-macos       # macOS userland archive
-nix build .#iland-ios         # iOS cross archive
+nix build .#iland-macos              # Mode A macOS archive
+nix build .#iland-ios                # Mode A iOS archive
+nix build .#iland-baremetal-macos    # Mode B dylib (macOS only)
 ```
 
 ## License
@@ -53,3 +72,7 @@ nix build .#iland-ios         # iOS cross archive
 The Wawona Nix packaging in this repo is MIT (see `LICENSE`). The vendored
 upstream `iland` sources under `dependencies/libs/iland/upstream/` retain their
 original upstream license terms.
+
+## Agents
+
+See [AGENTS.md](./AGENTS.md) for Mode A/B editing rules.

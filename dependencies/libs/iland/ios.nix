@@ -25,12 +25,26 @@ let
     else
       "static";
   angleStaticFlag = if angleLinkKind == "static" then "-DILAND_ANGLE_STATIC" else "";
-  sdkPlatform = if simulator then "iPhoneSimulator" else "iPhoneOS";
-  minFlag =
-    if simulator then
-      "-mios-simulator-version-min=${iosToolchain.deploymentTarget}"
+  # buildForVisionOS sets isVisionOSToolchain + xros/xrsimulator SDK; do not
+  # hardcode iPhoneSimulator or ld rejects libiland_userland.a (platform 7 vs 12).
+  isVisionOS = iosToolchain.isVisionOSToolchain or false;
+  minVersion = iosToolchain.deploymentTarget or (if isVisionOS then "26.0" else "17.0");
+  sdkPlatform =
+    if isVisionOS then
+      if simulator then "XRSimulator" else "XROS"
+    else if simulator then
+      "iPhoneSimulator"
     else
-      "-miphoneos-version-min=${iosToolchain.deploymentTarget}";
+      "iPhoneOS";
+  minFlag =
+    if isVisionOS && simulator then
+      "-target arm64-apple-xros${minVersion}-simulator"
+    else if isVisionOS then
+      "-target arm64-apple-xros${minVersion}"
+    else if simulator then
+      "-mios-simulator-version-min=${minVersion}"
+    else
+      "-miphoneos-version-min=${minVersion}";
 in
 pkgs.stdenv.mkDerivation {
   pname = "iland-userland";

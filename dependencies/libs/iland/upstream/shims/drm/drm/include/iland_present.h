@@ -72,6 +72,14 @@ int iland_drm_present_is_in_window(void);
  */
 void iland_drm_set_preferred_mode(uint32_t w, uint32_t h, uint32_t refresh);
 
+/*
+ * Ensure DRM_VIRTUAL_FD (42) is a real pipe readable by select/poll, and set
+ * g_drm_event_pipe_write so page-flip events can wake kmscube / nested DRM
+ * clients. Required for in-process Mode A on Apple mobile (no Dobby
+ * wayland-mac constructor). Idempotent; returns 0 on success.
+ */
+int iland_drm_prepare_virtual_fd(void);
+
 #ifdef __cplusplus
 }
 #endif

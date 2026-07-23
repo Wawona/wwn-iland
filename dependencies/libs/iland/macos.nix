@@ -16,12 +16,10 @@
   pkgs,
   stdenv,
   buildModule,
-  # iland Mode B (bare-metal WindowServer replacement) opt-in. Default false:
-  # build only the App-Store-safe Mode A userland (in-window IOSurface + ANGLE).
-  # When true, additionally stage the Mode B sources (Dobby injection, AMFI
-  # bypass, framebufferd/SkyLight, inputd, symrez). Mode B is macOS-only, is NOT
-  # App-Store-safe (needs SIP off + root + private entitlements), and is never
-  # used by the default app/store builds.
+  # Legacy flag: Mode B dylib now builds via macos-baremetal.nix
+  # (`iland-baremetal` registry entry). Keeping this for callers that still
+  # pass baremetal=true — it only stages sources for inspection, it does NOT
+  # produce libwayland-mac.dylib (use buildForMacOS "iland-baremetal").
   baremetal ? false,
   # Injected by wwn-toolchain (xcodeUtils === the apple toolchain). Previously
   # imported via ../../utils/xcode-wrapper.nix.

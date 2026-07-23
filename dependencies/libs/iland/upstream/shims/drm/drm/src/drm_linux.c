@@ -190,9 +190,29 @@ static struct {
 } g_state;
 
 /* DRM event pipe — written by drmModePageFlip, read by drmHandleEvent.
- * wayland-mac.c dup2's a real pipe to fd DRM_VIRTUAL_FD at startup so
- * select/poll work natively on the virtual fd.  -1 = not initialised. */
+ * wayland-mac.c (macOS bare-metal) or iland_drm_prepare_virtual_fd() (in-process
+ * Mode A / Apple mobile) dup2's a real pipe to fd DRM_VIRTUAL_FD so select/poll
+ * work natively on the virtual fd.  -1 = not initialised. */
 int g_drm_event_pipe_write = -1;
+
+int iland_drm_prepare_virtual_fd(void)
+{
+    if (g_drm_event_pipe_write >= 0)
+        return 0;
+
+    int p[2];
+    if (pipe(p) != 0)
+        return -1;
+
+    if (dup2(p[0], DRM_VIRTUAL_FD) < 0) {
+        close(p[0]);
+        close(p[1]);
+        return -1;
+    }
+    close(p[0]);
+    g_drm_event_pipe_write = p[1];
+    return 0;
+}
 
 /* Pending page-flip user_data — drmModePageFlip stores it, drmHandleEvent
  * passes it to the event handler.  Only one outstanding flip at a time. */
