@@ -7,6 +7,22 @@ replaces the macOS WindowServer/SkyLight stack for Wayland/Weston GL clients
 
 Extracted from the Wawona monorepo. Built with [wwn-toolchain](https://github.com/Wawona/wwn-toolchain).
 
+## Layer identity (L1) — acyclic DAG
+
+```text
+L0 wwn-toolchain (substrate: cairo/pango/pixman/libwayland/…)
+   ▼
+L1 wwn-iland (this repo: complete graphics stack) → depends on toolchain ONLY
+   ▼
+L2 wwn-kmscube → L3 wwn-weston → L4 Wawona
+```
+
+`wwn-iland` is **L1: the complete Wawona graphics stack** (userland
+DRM/KMS/GBM/EGL present + Mode A/B; ANGLE + Vulkan ICDs after P2). It depends on
+`wwn-toolchain` (L0) only. Never add weston/kmscube/waypipe/Wawona as a flake
+input, and never move substrate libs (pixman/cairo/pango) into this repo.
+Canonical: `Wawona/docs/wwn-repo-dag.md`; workspace rule `wawona-repo-dag`.
+
 ## Credit / upstream
 
 `wwn-iland` was inspired by and originally forked from

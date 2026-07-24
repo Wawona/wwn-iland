@@ -143,6 +143,9 @@ EOF
     cp shims/include/esUtil.h                        $out/include/ || true
     cp shims/drm/drm/include/drm.h                   $out/include/ || true
     cp shims/drm/drm/include/iland_present.h         $out/include/
+    # Mode A store-safe open() redirect — force-included by GL/DRM clients so
+    # their raw open("/dev/dri/cardN") reaches the in-process virtual fd (#58).
+    cp shims/drm/drm/include/iland_drm_open_compat.h $out/include/
 
     cp -r ${angle}/include/EGL/.   $out/include/EGL/
     cp -r ${angle}/include/GLES2/. $out/include/GLES2/

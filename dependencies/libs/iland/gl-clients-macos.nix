@@ -58,7 +58,10 @@ pkgs.stdenv.mkDerivation {
     # passes a `struct gbm_device *` that iland's eglGetDisplay casts back. The
     # offset->pointer attrib casts are also intentional. Relax both (upstream
     # kmscube builds the same way on such header combos).
-    CFLAGS="-isysroot $SDKROOT -mmacosx-version-min=12.0 -O2 -std=c11 $INCLUDES -Wno-int-conversion -Wno-int-to-void-pointer-cast"
+    # Force-include the Mode A open() redirect so kmscube's raw
+    # open("/dev/dri/card0") reaches iland's virtual DRM fd instead of ENOENT
+    # (#58). Store-safe: no DYLD interpose, no /dev/dri.
+    CFLAGS="-isysroot $SDKROOT -mmacosx-version-min=12.0 -O2 -std=c11 $INCLUDES -include ${iland}/include/iland_drm_open_compat.h -Wno-int-conversion -Wno-int-to-void-pointer-cast"
 
     # iland pulls in IOSurface/Foundation/CoreFoundation/CoreGraphics/Accelerate.
     FRAMEWORKS="-framework IOSurface -framework Foundation -framework CoreFoundation -framework CoreGraphics -framework Accelerate -framework QuartzCore -framework Metal"

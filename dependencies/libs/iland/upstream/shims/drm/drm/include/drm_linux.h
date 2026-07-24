@@ -2,9 +2,12 @@
  * drm_linux.h — Linux-compatible DRM API shim for macOS.
  *
  * Provides the subset of xf86drm.h / drm_mode.h used by Wayland compositors
- * (wlroots, mutter, etc.).  All functions are implemented as stubs that route
- * through the Mach IPC channel to framebufferd; unsupported ioctls return -1
- * with errno = ENOSYS.
+ * (wlroots, mutter, weston) and kmscube. This is a real userland DRM/KMS
+ * implementation over an emulated Apple/Android KMS backend (connector/CRTC/
+ * plane/FB backed by IOSurface): drmMode* build resources/FBs and drmModePageFlip
+ * presents. In Mode A (default) page-flip drives the in-process present callback
+ * (see iland_present.h); in Mode B (macOS desktop-host) it routes to framebufferd
+ * over Mach IPC. Unimplemented corners return -1 with errno = ENOSYS/ENOTSUP.
  */
 
 #ifndef DRM_LINUX_H
@@ -180,6 +183,12 @@ typedef struct drmEventContext {
 int  drmOpen(const char *name, const char *busid);
 int  drmOpenWithType(const char *name, const char *busid, int type);
 int  drmClose(int fd);
+
+/* Mode A store-safe device open: redirect open of a "/dev/dri/cardN" node to the
+ * in-process virtual DRM fd (see iland_drm_open_compat.h). Other paths defer to
+ * libc open().
+ * Lets stock clients (kmscube/weston) run unmodified without /dev/dri (#58). */
+int  iland_drm_open_card(const char *path, int flags, ...);
 
 /* ── capability ───────────────────────────────────────────────────────── */
 

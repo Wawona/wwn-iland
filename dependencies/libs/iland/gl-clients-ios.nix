@@ -45,8 +45,11 @@ pkgs.stdenv.mkDerivation {
     AR="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/ar"
 
     INCLUDES="-I${iland}/include -I${iland}/include/EGL -I${iland}/include/GLES2 -I${angle}/include"
+    # Force-include the Mode A open() redirect so kmscube's raw
+    # open("/dev/dri/card0") reaches iland's virtual DRM fd instead of ENOENT
+    # (#58). Store-safe: no DYLD interpose, no /dev/dri.
     CFLAGS="-arch arm64 -isysroot $SDKROOT ${minFlag} -O2 -std=c11 \
-      $INCLUDES -Wno-int-conversion -Wno-int-to-void-pointer-cast"
+      $INCLUDES -include ${iland}/include/iland_drm_open_compat.h -Wno-int-conversion -Wno-int-to-void-pointer-cast"
 
     echo "CC libkmscube.a (in-process kmscube_main)"
     "$CLANG" -c $CFLAGS -Dmain=kmscube_main test/kmscube.c -o kmscube_main.o

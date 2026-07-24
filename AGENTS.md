@@ -30,6 +30,22 @@ Canonical prose (integration side):
 `Wawona/docs/iland-mode-a-b-desktop.md` and workspace rule
 `wawona-iland-mode-b-desktop`.
 
+## Repo DAG layer (L1) — never invert
+
+`wwn-iland` is **L1: the complete Wawona graphics stack** (iland userland
+DRM/KMS/GBM/EGL present + Mode A/B; after P2 also `angle`, `swiftshader`,
+`moltenvk`, `kosmickrisp`, Turnip hooks, `iland-cpu`). It depends on
+**`wwn-toolchain` (L0) ONLY**.
+
+- **Never** add `wwn-weston`, `wwn-kmscube`, `wwn-waypipe`, or `Wawona` as a
+  flake input of this repo (that would make iland depend on its consumers).
+- **Never** move substrate libs (`pixman`, `cairo`, `pango`, `libwayland`) into
+  this repo — they stay L0; `iland-cpu` *links* toolchain `pixman`.
+- Graphics keys (`angle`/`swiftshader`) move here from toolchain in P2; after
+  the move, consumers merge this repo's `registryFragment`, not bare toolchain.
+
+Canonical: `Wawona/docs/wwn-repo-dag.md` + workspace rule `wawona-repo-dag`.
+
 ## Layout
 
 - `dependencies/libs/iland/upstream/` — vendored CoreBedtime tree + Wawona shims

@@ -6,6 +6,8 @@
 
 #include <IOSurface/IOSurface.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -247,6 +249,37 @@ int drmClose(int fd)
 {
     (void)fd;
     return 0;
+}
+
+/* ── Mode A device open (store-safe; no /dev/dri, no DYLD interpose) ──────
+ *
+ * Stock clients open a card node with libc open() before any drmMode* call
+ * (kmscube: open("/dev/dri/card0"); weston drm-backend likewise). The static
+ * Mode A archive cannot interpose libc open() the way the Mode B dylib does
+ * (Dobby + DYLD_INSERT_LIBRARIES), so those raw opens would fail ENOENT (#58).
+ * Clients force-include <iland_drm_open_compat.h>, which routes a "/dev/dri/cardN"
+ * open here and returns the in-process virtual DRM fd; every other path falls through
+ * to the real libc open() below. This keeps the client unmodified and needs no
+ * privilege — App Store / Play safe. */
+int iland_drm_open_card(const char *path, int flags, ...)
+{
+    if (path && strncmp(path, "/dev/dri/", 9) == 0) {
+        if (iland_drm_prepare_virtual_fd() != 0) {
+            errno = ENODEV;
+            return -1;
+        }
+        return DRM_VIRTUAL_FD;
+    }
+
+    /* Non-DRM path: preserve libc open() semantics, including O_CREAT mode. */
+    if (flags & O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode_t mode = (mode_t)va_arg(ap, int);
+        va_end(ap);
+        return open(path, flags, mode);
+    }
+    return open(path, flags);
 }
 
 /* ── capability ───────────────────────────────────────────────────────── */
