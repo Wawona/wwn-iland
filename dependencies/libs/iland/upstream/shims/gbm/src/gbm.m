@@ -254,16 +254,19 @@ void gbm_bo_destroy(struct gbm_bo *bo)
 
 int gbm_bo_get_fd(struct gbm_bo *bo)
 {
-    (void)bo;
-    errno = ENOSYS;
-    return -1;
+    if (!bo || !bo->surface) { errno = EINVAL; return -1; }
+    /*
+     * Apple transfers the IOSurface out-of-band (ID/Mach port); linux-dmabuf
+     * still requires an fd field. Match waypipe's protocol-compatible
+     * placeholder while the modifier carries the IOSurface identity (#86).
+     */
+    return open("/dev/null", O_RDONLY | O_CLOEXEC);
 }
 
 int gbm_bo_get_fd_for_plane(struct gbm_bo *bo, int plane)
 {
-    (void)bo;(void)plane;
-    errno = ENOSYS;
-    return -1;
+    if (plane != 0) { errno = EINVAL; return -1; }
+    return gbm_bo_get_fd(bo);
 }
 
 int gbm_bo_get_plane_count(struct gbm_bo *bo)
@@ -286,8 +289,9 @@ uint32_t gbm_bo_get_offset(struct gbm_bo *bo, int plane)
 
 uint64_t gbm_bo_get_modifier(struct gbm_bo *bo)
 {
-    (void)bo;
-    return 0; /* DRM_FORMAT_MOD_LINEAR */
+    if (!bo || !bo->surface) return 0;
+    uint64_t id = (uint64_t)IOSurfaceGetID(bo->surface);
+    return 0x8000000000000000ULL | (id & 0x7fffffffffffffffULL);
 }
 
 int gbm_device_get_fd(struct gbm_device *gbm)
@@ -310,9 +314,37 @@ int gbm_bo_write(struct gbm_bo *bo, const void *buf, size_t count)
 struct gbm_bo *gbm_bo_import(struct gbm_device *gbm, uint32_t type,
                               void *buffer, uint32_t usage)
 {
-    (void)gbm;(void)type;(void)buffer;(void)usage;
-    errno = ENOSYS;
-    return NULL;
+    (void)usage;
+    if (!gbm || type != GBM_BO_IMPORT_FD_MODIFIER || !buffer) {
+        errno = EINVAL;
+        return NULL;
+    }
+    struct gbm_import_fd_modifier_data *data = buffer;
+    if (data->num_fds != 1 ||
+        (data->modifier & 0x8000000000000000ULL) == 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+    uint32_t surface_id =
+        (uint32_t)(data->modifier & 0x7fffffffffffffffULL);
+    IOSurfaceRef surface = IOSurfaceLookup(surface_id);
+    if (!surface) { errno = ENOENT; return NULL; }
+
+    struct gbm_bo *bo = calloc(1, sizeof(*bo));
+    if (!bo) {
+        CFRelease(surface);
+        errno = ENOMEM;
+        return NULL;
+    }
+    bo->device = gbm;
+    bo->width = data->width;
+    bo->height = data->height;
+    bo->stride = data->strides[0] > 0 ? (uint32_t)data->strides[0] :
+                 (uint32_t)IOSurfaceGetBytesPerRow(surface);
+    bo->format = data->format;
+    bo->surface = surface;
+    drm_register_gbm_buffer(surface_id, (void *)surface, data->format);
+    return bo;
 }
 
 struct gbm_surface *gbm_surface_create_with_modifiers(
