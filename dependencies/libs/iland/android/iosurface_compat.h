@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <android/hardware_buffer.h>
 
 typedef struct ILandIOSurface *IOSurfaceRef;
 
@@ -15,6 +16,7 @@ uint32_t ILandIOSurfaceGetHeight(IOSurfaceRef surf);
 size_t ILandIOSurfaceGetBytesPerRow(IOSurfaceRef surf);
 size_t ILandIOSurfaceGetAllocSize(IOSurfaceRef surf);
 void *ILandIOSurfaceGetBaseAddress(IOSurfaceRef surf);
+AHardwareBuffer *ILandIOSurfaceGetHardwareBuffer(IOSurfaceRef surf);
 void ILandIOSurfaceLock(IOSurfaceRef surf);
 void ILandIOSurfaceUnlock(IOSurfaceRef surf);
 

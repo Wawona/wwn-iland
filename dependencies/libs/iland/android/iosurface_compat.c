@@ -1,5 +1,6 @@
 #include "iosurface_compat.h"
 
+#include <android/hardware_buffer.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,7 +12,8 @@ struct ILandIOSurface {
     uint32_t bpe;
     uint32_t stride;
     size_t alloc_size;
-    uint8_t *data;
+    AHardwareBuffer *hardware_buffer;
+    uint8_t *mapped_data;
     int refcount;
 };
 
@@ -30,13 +32,28 @@ IOSurfaceRef ILandIOSurfaceCreate(uint32_t width, uint32_t height, uint32_t bpe)
     surf->width = width;
     surf->height = height;
     surf->bpe = bpe;
-    surf->stride = width * bpe;
-    surf->alloc_size = (size_t)surf->stride * height;
-    surf->data = calloc(1, surf->alloc_size);
-    if (!surf->data) {
+    AHardwareBuffer_Desc desc = {
+        .width = width,
+        .height = height,
+        .layers = 1,
+        .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+        .usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
+                 AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
+                 AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
+                 AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,
+        .stride = 0,
+        .rfu0 = 0,
+        .rfu1 = 0,
+    };
+    if (bpe != 4 ||
+        AHardwareBuffer_allocate(&desc, &surf->hardware_buffer) != 0 ||
+        !surf->hardware_buffer) {
         free(surf);
         return NULL;
     }
+    AHardwareBuffer_describe(surf->hardware_buffer, &desc);
+    surf->stride = desc.stride * bpe;
+    surf->alloc_size = (size_t)surf->stride * height;
 
     pthread_mutex_lock(&g_lock);
     surf->id = g_next_id++;
@@ -58,7 +75,7 @@ void ILandIOSurfaceRelease(IOSurfaceRef surf)
         return;
     if (--surf->refcount > 0)
         return;
-    free(surf->data);
+    AHardwareBuffer_release(surf->hardware_buffer);
     free(surf);
 }
 
@@ -89,15 +106,30 @@ size_t ILandIOSurfaceGetAllocSize(IOSurfaceRef surf)
 
 void *ILandIOSurfaceGetBaseAddress(IOSurfaceRef surf)
 {
-    return surf ? surf->data : NULL;
+    return surf ? surf->mapped_data : NULL;
+}
+
+AHardwareBuffer *ILandIOSurfaceGetHardwareBuffer(IOSurfaceRef surf)
+{
+    return surf ? surf->hardware_buffer : NULL;
 }
 
 void ILandIOSurfaceLock(IOSurfaceRef surf)
 {
-    (void)surf;
+    if (!surf || surf->mapped_data)
+        return;
+    void *address = NULL;
+    if (AHardwareBuffer_lock(surf->hardware_buffer,
+                             AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
+                                 AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,
+                             -1, NULL, &address) == 0)
+        surf->mapped_data = address;
 }
 
 void ILandIOSurfaceUnlock(IOSurfaceRef surf)
 {
-    (void)surf;
+    if (!surf || !surf->mapped_data)
+        return;
+    AHardwareBuffer_unlock(surf->hardware_buffer, NULL);
+    surf->mapped_data = NULL;
 }
