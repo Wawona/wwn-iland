@@ -68,6 +68,24 @@
     {
       # Registry fragment merged by Wawona / standalone builds over baseRegistry.
       registryFragment = {
+        # L1 graphics implementations. Recipes remain imported from the pinned
+        # L0 source during migration, but only iland owns/registers these keys;
+        # consumers cannot select them without the L1 fragment.
+        angle = withPlatformVariants {
+          android = "${wwn-toolchain}/dependencies/libs/angle/android.nix";
+          ios = "${wwn-toolchain}/dependencies/libs/angle/ios.nix";
+          ipados = "${wwn-toolchain}/dependencies/libs/angle/ios.nix";
+          tvos = "${wwn-toolchain}/dependencies/libs/angle/ios.nix";
+          visionos = "${wwn-toolchain}/dependencies/libs/angle/ios.nix";
+          watchos = "${wwn-toolchain}/dependencies/libs/angle/ios.nix";
+          macos = "${wwn-toolchain}/dependencies/libs/angle/macos.nix";
+        };
+        swiftshader = withPlatformVariants {
+          android = "${wwn-toolchain}/dependencies/libs/swiftshader/android.nix";
+          wearos = "${wwn-toolchain}/dependencies/libs/swiftshader/wearos.nix";
+          ios = null;
+          macos = null;
+        };
         iland = withPlatformVariants {
           android = ./dependencies/libs/iland/android.nix;
           ios = ./dependencies/libs/iland/ios.nix;
