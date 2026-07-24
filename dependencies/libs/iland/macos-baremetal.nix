@@ -54,6 +54,8 @@ pkgs.stdenv.mkDerivation {
     substituteInPlace shims/egl/src/egl.c \
       --replace "/opt/local/lib/libEGL.dylib"    "${angle}/lib/libEGL.dylib" \
       --replace "/opt/local/lib/libGLESv2.dylib" "${angle}/lib/libGLESv2.dylib"
+    substituteInPlace shims/egl/CMakeLists.txt \
+      --replace '/opt/local/include' '${angle}/include'
 
     # inputd CMake hardcodes /opt/local/include — drop it (IOKit headers are in SDK).
     substituteInPlace shims/libinput/input-daemon/CMakeLists.txt \
@@ -65,23 +67,35 @@ pkgs.stdenv.mkDerivation {
   buildPhase = ''
     runHook preBuild
 
-    unset DEVELOPER_DIR
-    MACOS_SDK=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)
-    if [ ! -d "$MACOS_SDK" ]; then
-      MACOS_SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
-    fi
-    if [ ! -d "$MACOS_SDK" ]; then
-      MACOS_SDK=$(${xcodeUtils.findXcodeScript}/bin/find-xcode)/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
-    fi
+    # CMake links the injected dylib and its embedded root helpers.  It must use
+    # one Xcode compiler + SDK pair; the Nix clang wrapper injects its own
+    # apple-sdk DEVELOPER_DIR and conflicts with a host SDK at link time.
+    XCODE_APP=$(${xcodeUtils.findXcodeScript}/bin/find-xcode)
+    export DEVELOPER_DIR="$XCODE_APP/Contents/Developer"
+    # CMake's helper targets invoke `codesign` by name. Nix's build PATH omits
+    # host /usr/bin, but prepending it would shadow GNU find/cut used by
+    # fixupPhase. Provide only the required host binary through a tiny wrapper.
+    mkdir -p .mode-b-tools
+    cat > .mode-b-tools/codesign <<'EOF'
+    #!/bin/sh
+    exec /usr/bin/codesign "$@"
+    EOF
+    chmod +x .mode-b-tools/codesign
+    export PATH="$PWD/.mode-b-tools:$PATH"
+    MACOS_SDK="$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
     if [ ! -d "$MACOS_SDK" ]; then
       echo "ERROR: MacOSX SDK not found." >&2
       exit 1
     fi
     export SDKROOT="$MACOS_SDK"
-    export DEVELOPER_DIR="''${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
+    CLANG="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"
+    CLANGXX="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++"
 
     cmake -G Ninja -B build -S . \
       -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_COMPILER="$CLANG" \
+      -DCMAKE_CXX_COMPILER="$CLANGXX" \
+      -DCMAKE_OBJC_COMPILER="$CLANG" \
       -DCMAKE_OSX_SYSROOT="$SDKROOT" \
       -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
       -DFETCHCONTENT_SOURCE_DIR_DOBBY="${dobbySrc}" \

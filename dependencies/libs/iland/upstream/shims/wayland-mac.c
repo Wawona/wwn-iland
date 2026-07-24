@@ -2,11 +2,13 @@
 #include <_stdlib.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <mach/mach.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include <servers/bootstrap.h>
 #include <spawn.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +35,43 @@ int     epoll_shim_fcntl(int fd, int cmd, ...);
 #define SUPPORT_DIR "/tmp/libwayland-support"
 
 extern char **environ;
+
+/*
+ * Mode B helper ownership.
+ *
+ * The injected dylib starts framebufferd/inputd/caffeinate on behalf of one
+ * desktop-host Weston session.  Those helpers run as root and are not children
+ * of the GUI app, so simply killing Weston used to leave them alive.  Track
+ * only processes this dylib spawned and terminate them when the injected
+ * Weston process unloads/exits.  Do not touch helpers belonging to an already
+ * registered framebufferd service (another Mode B session owns those).
+ */
+static pid_t g_framebufferd_pid = -1;
+static pid_t g_inputd_pid       = -1;
+static pid_t g_caffeinate_pid   = -1;
+static bool  g_owns_helpers     = false;
+
+static void write_helper_pid(const char *name, pid_t pid)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), SUPPORT_DIR "/%s.pid", name);
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "[wayland-mac] cannot write %s: %s\n",
+                path, strerror(errno));
+        return;
+    }
+    dprintf(fd, "%d\n", (int)pid);
+    close(fd);
+}
+
+static void remove_helper_pid(const char *name)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), SUPPORT_DIR "/%s.pid", name);
+    unlink(path);
+}
 
 /* ── Dobby hook function pointer definitions ──────────────────────────
  * These are referenced via `extern` by wrap.c in epoll-shim-interpose.
@@ -215,7 +254,7 @@ static int spawn_and_wait(const char *path, char *const argv[]) {
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-static int spawn_background(const char *path, char *const argv[]) {
+static int spawn_background(const char *path, char *const argv[], pid_t *pid_out) {
     pid_t pid;
     posix_spawnattr_t spattr;
     posix_spawnattr_init(&spattr);
@@ -234,7 +273,38 @@ static int spawn_background(const char *path, char *const argv[]) {
                 strerror(ret));
         return -1;
     }
+    if (pid_out)
+        *pid_out = pid;
     return 0;
+}
+
+static void stop_owned_helper(pid_t *pid, const char *name)
+{
+    if (!pid || *pid <= 0)
+        return;
+
+    if (kill(*pid, SIGTERM) != 0 && errno != ESRCH)
+        fprintf(stderr, "[wayland-mac] failed to stop %s pid %d: %s\n",
+                name, (int)*pid, strerror(errno));
+    *pid = -1;
+    remove_helper_pid(name);
+}
+
+__attribute__((destructor))
+static void wayland_mac_unload(void)
+{
+    if (!g_owns_helpers)
+        return;
+
+    /*
+     * Reverse startup order.  framebufferd releases the retained IOSurface
+     * after its run loop exits; inputd/caffeinate must not outlive the desktop
+     * session.  These are the PIDs spawned by this dylib only.
+     */
+    stop_owned_helper(&g_caffeinate_pid, "caffeinate");
+    stop_owned_helper(&g_inputd_pid, "inputd");
+    stop_owned_helper(&g_framebufferd_pid, "framebufferd");
+    g_owns_helpers = false;
 }
 
 static void install_drm_hooks(void)
@@ -322,7 +392,13 @@ static void wayland_mac_load(void) {
             (char *)framebufferd_path,
             NULL
         };
-        spawn_background(framebufferd_path, argv);
+        if (spawn_background(framebufferd_path, argv, &g_framebufferd_pid) != 0)
+            return;
+        write_helper_pid("framebufferd", g_framebufferd_pid);
+        g_owns_helpers = true;
+    } else {
+        fprintf(stderr, "[wayland-mac] could not extract framebufferd\n");
+        return;
     }
 
 
@@ -333,7 +409,12 @@ static void wayland_mac_load(void) {
             (char *)inputd_path,
             NULL
         };
-        spawn_background(inputd_path, argv);
+        if (spawn_background(inputd_path, argv, &g_inputd_pid) != 0)
+            return;
+        write_helper_pid("inputd", g_inputd_pid);
+    } else {
+        fprintf(stderr, "[wayland-mac] could not extract inputd\n");
+        return;
     }
 
     /* Prevent display sleep while weston is running */
@@ -343,7 +424,9 @@ static void wayland_mac_load(void) {
             (char *)"-d",
             NULL
         };
-        spawn_background("/usr/bin/caffeinate", argv);
+        if (spawn_background("/usr/bin/caffeinate", argv, &g_caffeinate_pid) != 0)
+            return;
+        write_helper_pid("caffeinate", g_caffeinate_pid);
     }
 
     {
