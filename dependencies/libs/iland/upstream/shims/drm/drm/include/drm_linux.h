@@ -252,7 +252,10 @@ int drmModeRmFB(int fd, uint32_t buf_id);
 
 /* GBM buffer registration — called by gbm.m so drmModeAddFB can resolve
  * GBM-created buffer handles to IOSurfaces.                          */
-void drm_register_gbm_buffer(uint32_t handle, void *surface);
+/* Register a GBM BO and the exact DRM fourcc its IOSurface allocator supports.
+ * AddFB2 rejects a mismatched format rather than presenting channel-swapped
+ * output (#94). */
+void drm_register_gbm_buffer(uint32_t handle, void *surface, uint32_t format);
 void drm_unregister_gbm_buffer(uint32_t handle);
 
 /* ── page flip ────────────────────────────────────────────────────────── */

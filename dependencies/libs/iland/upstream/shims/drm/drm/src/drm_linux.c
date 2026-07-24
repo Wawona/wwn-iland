@@ -1,6 +1,7 @@
 #include "drm_linux.h"
 #include "drm.h"
 #include "drm_ioctl.h"
+#include "drm_fourcc.h"
 #include "DisplaySurface.h"
 #include "iland_present.h"
 
@@ -469,6 +470,7 @@ typedef struct fb_entry {
     IOSurfaceRef surface;     /* retained */
     uint32_t    width;
     uint32_t    height;
+    uint32_t    format;       /* DRM fourcc retained from AddFB2 */
     uint32_t    bpp;
     uint32_t    pitch;
 } fb_entry_t;
@@ -565,22 +567,25 @@ int drmModeMapDumbBuffer(int fd, uint32_t handle, uint64_t *offset)
 typedef struct {
     uint32_t     handle;
     IOSurfaceRef surface;
+    uint32_t     format;
 } gbm_buf_entry_t;
 
 static gbm_buf_entry_t g_gbm_bufs[MAX_GBM_BUFS];
 static int             g_gbm_buf_count;
 
-void drm_register_gbm_buffer(uint32_t handle, void *surface)
+void drm_register_gbm_buffer(uint32_t handle, void *surface, uint32_t format)
 {
     if (!surface || handle == 0) return;
     for (int i = 0; i < g_gbm_buf_count; i++)
         if (g_gbm_bufs[i].handle == handle) {
             g_gbm_bufs[i].surface = (IOSurfaceRef)surface;
+            g_gbm_bufs[i].format = format;
             return;
         }
     if (g_gbm_buf_count >= MAX_GBM_BUFS) return;
     g_gbm_bufs[g_gbm_buf_count].handle  = handle;
     g_gbm_bufs[g_gbm_buf_count].surface = (IOSurfaceRef)surface;
+    g_gbm_bufs[g_gbm_buf_count].format  = format;
     g_gbm_buf_count++;
 }
 
@@ -593,11 +598,13 @@ void drm_unregister_gbm_buffer(uint32_t handle)
         }
 }
 
-static IOSurfaceRef lookup_gbm_buffer(uint32_t handle)
+static IOSurfaceRef lookup_gbm_buffer(uint32_t handle, uint32_t *format)
 {
     for (int i = 0; i < g_gbm_buf_count; i++)
-        if (g_gbm_bufs[i].handle == handle)
+        if (g_gbm_bufs[i].handle == handle) {
+            if (format) *format = g_gbm_bufs[i].format;
             return g_gbm_bufs[i].surface;
+        }
     return NULL;
 }
 
@@ -619,8 +626,9 @@ int drmModeAddFB(int fd, uint32_t width, uint32_t height,
             break;
         }
     }
+    uint32_t drm_format = DRM_FORMAT_XRGB8888;
     if (!surf)
-        surf = lookup_gbm_buffer(bo_handle);
+        surf = lookup_gbm_buffer(bo_handle, &drm_format);
     if (!surf) { errno = ENOENT; return -1; }
 
     /* Find free FB slot */
@@ -638,6 +646,7 @@ int drmModeAddFB(int fd, uint32_t width, uint32_t height,
         .surface = surf,
         .width   = width,
         .height  = height,
+        .format  = drm_format,
         .bpp     = bpp,
         .pitch   = pitch,
     };
@@ -653,11 +662,48 @@ int drmModeAddFB2(int fd, uint32_t width, uint32_t height,
                   const uint32_t offsets[4],
                   uint32_t *buf_id, uint32_t flags)
 {
-    (void)pixel_format; (void)offsets; (void)flags;
-    return drmModeAddFB(fd, width, height, 24, 32,
-                        pitches ? pitches[0] : 0,
-                        bo_handles ? bo_handles[0] : 0,
-                        buf_id);
+    (void)offsets;
+    (void)flags;
+    if (check_fd(fd) < 0) return -1;
+    if (!buf_id || !bo_handles || !pitches) { errno = EINVAL; return -1; }
+
+    /*
+     * AddFB2 is the format contract between GBM and KMS. Refuse a mismatched
+     * fourcc instead of accepting it and later sampling BGRA as a different
+     * channel order (#94).
+     */
+    uint32_t backing_format = 0;
+    IOSurfaceRef surf = lookup_gbm_buffer(bo_handles[0], &backing_format);
+    if (!surf) {
+        for (int i = 0; i < MAX_DUMB_BUFS; i++) {
+            if (g_dumb[i].handle == bo_handles[0]) {
+                surf = g_dumb[i].surface;
+                backing_format = DRM_FORMAT_XRGB8888;
+                break;
+            }
+        }
+    }
+    if (!surf) { errno = ENOENT; return -1; }
+    if (pixel_format != backing_format) { errno = EINVAL; return -1; }
+    if (pixel_format != DRM_FORMAT_XRGB8888 &&
+        pixel_format != DRM_FORMAT_ARGB8888 &&
+        pixel_format != DRM_FORMAT_XRGB2101010 &&
+        pixel_format != DRM_FORMAT_ARGB2101010) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int ret = drmModeAddFB(fd, width, height, 24, 32, pitches[0],
+                           bo_handles[0], buf_id);
+    if (ret != 0) return ret;
+    for (int i = 0; i < MAX_FBS; i++) {
+        if (g_fbs[i].fb_id == *buf_id) {
+            g_fbs[i].format = pixel_format;
+            return 0;
+        }
+    }
+    errno = EIO;
+    return -1;
 }
 
 int drmModeRmFB(int fd, uint32_t buf_id)

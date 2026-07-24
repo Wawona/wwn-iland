@@ -5,16 +5,43 @@
 #import <string.h>
 #import <errno.h>
 #import "DisplaySurface.h"
+#include "drm_fourcc.h"
 
 /* Register GBM buffer handles so drmModeAddFB can resolve them. */
-extern void drm_register_gbm_buffer(uint32_t handle, void *surface);
+extern void drm_register_gbm_buffer(uint32_t handle, void *surface,
+                                    uint32_t format);
 extern void drm_unregister_gbm_buffer(uint32_t handle);
+
+/*
+ * Mode A has one physical IOSurface format per GBM BO.  Do not advertise a
+ * DRM fourcc that the allocator silently ignores: XRGB/ARGB are both
+ * byte-addressable BGRA IOSurfaces on Apple; 10-bit XRGB/ARGB use l10r.
+ * Callers get EINVAL for formats that need a distinct channel layout rather
+ * than a purple-tinted "successful" frame (#94).
+ */
+static WSPixelFormat iosurface_format_for_drm(uint32_t format)
+{
+    switch (format) {
+    case DRM_FORMAT_XRGB8888:
+    case DRM_FORMAT_ARGB8888:
+        return kWSPixelFormatBGRA;
+    case DRM_FORMAT_XRGB2101010:
+    case DRM_FORMAT_ARGB2101010:
+        return kWSPixelFormatARGB2101010;
+    default:
+        return 0;
+    }
+}
 
 static IOSurfaceRef create_iosurface(uint32_t width, uint32_t height,
                                       uint32_t format)
 {
-    (void)format;
-    DisplaySurfaceInfo dsi = DisplaySurface_create(width, height, kWSPixelFormatBGRA);
+    WSPixelFormat ws_format = iosurface_format_for_drm(format);
+    if (ws_format == 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+    DisplaySurfaceInfo dsi = DisplaySurface_create(width, height, ws_format);
     return dsi.surface;
 }
 
@@ -58,7 +85,7 @@ struct gbm_surface *gbm_surface_create(struct gbm_device *gbm,
         bo->stride = (uint32_t)IOSurfaceGetBytesPerRow(bo->surface);
         bo->format = format;
         drm_register_gbm_buffer((uint32_t)IOSurfaceGetID(bo->surface),
-                                (void*)bo->surface);
+                                (void*)bo->surface, format);
         surf->bos[i] = bo;
     }
     return surf;
@@ -190,7 +217,7 @@ struct gbm_bo *gbm_bo_create(struct gbm_device *gbm,
     bo->stride = (uint32_t)IOSurfaceGetBytesPerRow(bo->surface);
     bo->format = format;
     drm_register_gbm_buffer((uint32_t)IOSurfaceGetID(bo->surface),
-                            (void*)bo->surface);
+                            (void*)bo->surface, format);
     return bo;
 }
 
