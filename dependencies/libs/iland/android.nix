@@ -138,6 +138,7 @@ PY
       -Ishims/drm/drm/include \
       -Ishims/gbm/include \
       -Ishims/egl/include \
+      -Ishims/udev/include \
       -I${angle}/include \
       -I${angle}/include/EGL \
       -I${angle}/include/GLES2"
@@ -152,6 +153,7 @@ PY
       ${androidDir}/drm_ipc_stubs.c \
       shims/drm/drm/src/drm_linux.c \
       shims/drm/drm/src/drm_ioctl.c \
+      shims/udev/src/udev.c \
       shims/egl/src/egl.c; do
       obj="$(basename "$src").o"
       echo "CC $src"
@@ -178,6 +180,7 @@ PY
     cp shims/include/esUtil.h                        $out/include/ || true
     cp shims/drm/drm/include/drm.h                   $out/include/ || true
     cp shims/drm/drm/include/iland_present.h         $out/include/
+    cp shims/udev/include/libudev.h                  $out/include/
     # Mode A store-safe open() redirect — force-included by GL/DRM clients so
     # their raw open("/dev/dri/cardN") reaches the in-process virtual fd (#58).
     cp shims/drm/drm/include/iland_drm_open_compat.h $out/include/
