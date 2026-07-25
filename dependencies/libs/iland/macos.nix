@@ -29,6 +29,12 @@
 
 let
   angle = buildModule.buildForMacOS "angle" { };
+  # Wayland-EGL winsys: libwayland-client for the protocol calls, scanner +
+  # protocol XML to generate the linux-dmabuf client bindings the winsys posts
+  # IOSurfaces through.
+  libwayland = buildModule.buildForMacOS "libwayland" { };
+  waylandScanner = pkgs.wayland-scanner;
+  waylandProtocols = pkgs.wayland-protocols;
 in
 pkgs.stdenv.mkDerivation {
   pname = "iland-userland";
@@ -38,6 +44,10 @@ pkgs.stdenv.mkDerivation {
 
   # Needs the macOS SDK (IOSurface/Accelerate/Foundation frameworks) via xcrun.
   __noChroot = true;
+
+  # wayland-scanner is multi-output; take it from PATH rather than guessing
+  # which output holds the binary.
+  nativeBuildInputs = [ waylandScanner ];
 
   dontConfigure = true;
 
@@ -72,12 +82,21 @@ pkgs.stdenv.mkDerivation {
     CLANG="${pkgs.clang}/bin/clang"
     AR="ar"
 
+    # linux-dmabuf client bindings for the Wayland-EGL winsys. Generated rather
+    # than vendored so the marshalling stays in step with libwayland.
+    DMABUF_XML="${waylandProtocols}/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml"
+    wayland-scanner client-header "$DMABUF_XML" linux-dmabuf-v1-client-protocol.h
+    wayland-scanner private-code  "$DMABUF_XML" linux-dmabuf-v1-protocol.c
+
     INCLUDES="\
+      -I. \
       -Ishims/include \
       -Ishims/drm/displaysurface/include \
       -Ishims/drm/drm/include \
       -Ishims/gbm/include \
       -Ishims/egl/include \
+      -Ishims/wayland-egl/include \
+      -I${libwayland}/include \
       -I${angle}/include"
 
     COMMON_FLAGS="-isysroot $SDKROOT -mmacosx-version-min=12.0 -fPIC -O2 -std=c11 $INCLUDES"
@@ -89,6 +108,9 @@ pkgs.stdenv.mkDerivation {
       shims/drm/drm/src/drm.c \
       shims/drm/drm/src/drm_linux.c \
       shims/drm/drm/src/drm_ioctl.c \
+      shims/wayland-egl/src/wayland_egl.c \
+      shims/egl/src/egl_wayland.c \
+      linux-dmabuf-v1-protocol.c \
       shims/egl/src/egl.c; do
       obj="$(basename "$src").o"
       echo "CC $src"
@@ -109,6 +131,10 @@ pkgs.stdenv.mkDerivation {
     # Public client-facing headers
     cp shims/gbm/include/gbm.h                       $out/include/
     cp shims/egl/include/egl_shim.h                  $out/include/
+    # Wayland-EGL winsys. wl_egl_window_* live in this archive, so a client must
+    # NOT also link libwayland-egl (its vendor stub aborts) — link iland instead.
+    cp shims/egl/include/iland_wl_winsys.h           $out/include/
+    cp shims/wayland-egl/include/iland_wayland_egl.h $out/include/
     cp shims/drm/displaysurface/include/DisplaySurface.h $out/include/
     cp shims/include/drm_fourcc.h                    $out/include/
     cp shims/include/xf86drm.h                       $out/include/

@@ -4,9 +4,30 @@
 #include <gbm.h>
 #include <EGL/egl.h>
 
+/* Wayland winsys types stay opaque here; see shims/egl/include/iland_wl_winsys.h. */
+struct wl_display;
+struct wl_egl_window;
+typedef struct IlandWlWinsys IlandWlWinsys;
+typedef struct IlandWlSwapchain IlandWlSwapchain;
+
+/*
+ * Which native platform the client handed us. GBM is iland's userspace
+ * KMS/DRM path (kmscube and friends, EGL_DEFAULT_DISPLAY / gbm_device);
+ * WAYLAND is a real Wayland client rendering onto Wawona's compositor
+ * (eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wl_display, ...)).
+ */
+typedef enum EGLShimDisplayKind {
+    EGL_SHIM_DISPLAY_GBM     = 0,
+    EGL_SHIM_DISPLAY_WAYLAND = 1,
+} EGLShimDisplayKind;
+
 typedef struct EGLShimDisplay {
     EGLDisplay angle_display;
     struct gbm_device *gbm_device;
+
+    EGLShimDisplayKind kind;
+    struct wl_display *wl_display;
+    IlandWlWinsys *wl_winsys;      /* bound lazily at eglInitialize */
 } EGLShimDisplay;
 
 typedef struct EGLShimSurface {
@@ -18,11 +39,19 @@ typedef struct EGLShimSurface {
     /* Zero-copy path (ILAND_EGL_ZEROCOPY=1): instead of glReadPixels + a CPU
      * channel-swap into the IOSurface, ANGLE renders directly into an
      * IOSurface-backed Metal texture via EGL_ANGLE_iosurface_client_buffer.
-     * One ANGLE pbuffer is cached per gbm bo (must cover GBM_NUM_BUFFERS = 4).
-     * Lazily created the first time a bo is presented. */
+     * One ANGLE pbuffer is cached per gbm bo (must cover GBM_NUM_BUFFERS = 4)
+     * or, on Wayland, per swapchain slot. Lazily created on first present. */
     int        zerocopy;
     EGLConfig  config;
     EGLSurface iosurf_pbuffers[4];
+
+    /* Wayland window surface. The swapchain owns the IOSurfaces and their
+     * wl_buffers; iosurf_pbuffers[] above caches the ANGLE render target bound
+     * to each slot. */
+    int wayland;
+    struct wl_egl_window *wl_window;
+    IlandWlSwapchain *wl_swapchain;
+    int wl_slot;
 } EGLShimSurface;
 
 #endif

@@ -19,6 +19,11 @@
 
 let
   angle = buildModule.buildForIOS "angle" { inherit simulator; };
+  # Wayland-EGL winsys (same IOSurface-as-dmabuf path as macOS): libwayland-client
+  # for the protocol calls, scanner + XML for the linux-dmabuf client bindings.
+  libwayland = buildModule.buildForIOS "libwayland" { inherit simulator; };
+  waylandScanner = pkgs.wayland-scanner;
+  waylandProtocols = pkgs.wayland-protocols;
   angleLinkKind =
     if builtins.pathExists "${angle}/nix-support/link-kind" then
       lib.strings.trim (builtins.readFile "${angle}/nix-support/link-kind")
@@ -54,6 +59,9 @@ pkgs.stdenv.mkDerivation {
 
   __noChroot = true;
   dontConfigure = true;
+
+  # wayland-scanner is multi-output; take it from PATH.
+  nativeBuildInputs = [ waylandScanner ];
 
   postPatch = ''
     find shims -type f \( -name '*.h' -o -name '*.m' -o -name '*.c' \) \
@@ -97,12 +105,21 @@ EOF
     CLANG="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"
     AR="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/ar"
 
+    # linux-dmabuf client bindings for the Wayland-EGL winsys.
+    DMABUF_XML="${waylandProtocols}/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml"
+    wayland-scanner client-header "$DMABUF_XML" linux-dmabuf-v1-client-protocol.h
+    wayland-scanner private-code  "$DMABUF_XML" linux-dmabuf-v1-protocol.c
+
     INCLUDES="\
+      -I. \
       -Ishims/include \
       -Ishims/drm/displaysurface/include \
       -Ishims/drm/drm/include \
       -Ishims/gbm/include \
       -Ishims/egl/include \
+      -Ishims/wayland-egl/include \
+      -I${libwayland}/include \
+      -I${libwayland}/include/wayland \
       -I${angle}/include \
       -I${angle}/include/EGL \
       -I${angle}/include/GLES2"
@@ -118,6 +135,9 @@ EOF
       shims/drm/drm/src/drm_linux.c \
       shims/drm/drm/src/drm_ioctl.c \
       shims/drm/drm/src/drm_ios_ipc_stubs.c \
+      shims/wayland-egl/src/wayland_egl.c \
+      shims/egl/src/egl_wayland.c \
+      linux-dmabuf-v1-protocol.c \
       shims/egl/src/egl.c; do
       obj="$(basename "$src").o"
       echo "CC $src"
@@ -137,6 +157,10 @@ EOF
 
     cp shims/gbm/include/gbm.h                       $out/include/
     cp shims/egl/include/egl_shim.h                  $out/include/
+    # Wayland-EGL winsys. wl_egl_window_* live in this archive, so clients must
+    # NOT also link libwayland-egl (that one is an abort-on-call vendor stub).
+    cp shims/egl/include/iland_wl_winsys.h           $out/include/
+    cp shims/wayland-egl/include/iland_wayland_egl.h $out/include/
     cp shims/drm/displaysurface/include/DisplaySurface.h $out/include/
     cp shims/include/drm_fourcc.h                    $out/include/
     cp shims/include/xf86drm.h                       $out/include/

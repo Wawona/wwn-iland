@@ -36,6 +36,14 @@
 #include <IOSurface/IOSurfaceRef.h>
 #include <Accelerate/Accelerate.h>
 
+/* Wayland-EGL winsys: IOSurface-backed wl_buffers posted via linux-dmabuf.
+ * Apple-only for now — the Android equivalent posts AHardwareBuffer instead. */
+#if defined(__APPLE__) && !defined(ILAND_NO_WL_WINSYS)
+#define ILAND_HAVE_WL_WINSYS 1
+#include "iland_wayland_egl.h"
+#include "iland_wl_winsys.h"
+#endif
+
 #ifdef ILAND_ANGLE_STATIC
 #include <GLES2/gl2.h>
 #undef eglGetDisplay
@@ -351,10 +359,61 @@ EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id)
     EGLShimDisplay *dpy = calloc(1, sizeof(*dpy));
     if (!dpy) return EGL_NO_DISPLAY;
 
+    dpy->kind = EGL_SHIM_DISPLAY_GBM;
     dpy->gbm_device = (struct gbm_device *)display_id;
     dpy->angle_display = real_eglGetDisplay(EGL_DEFAULT_DISPLAY);
 
     return (EGLDisplay)dpy;
+}
+
+#ifndef EGL_PLATFORM_WAYLAND_KHR
+#define EGL_PLATFORM_WAYLAND_KHR 0x31D8
+#endif
+#ifndef EGL_PLATFORM_GBM_KHR
+#define EGL_PLATFORM_GBM_KHR     0x31D7
+#endif
+
+/*
+ * Wayland clients reach us here rather than through eglGetDisplay: a
+ * wl_display* and a gbm_device* are both bare pointers, so the platform enum is
+ * the only way to tell which winsys the client means.
+ */
+static EGLDisplay shim_get_platform_display(EGLenum platform, void *native)
+{
+    if (load_angle() < 0) return EGL_NO_DISPLAY;
+
+    if (platform != EGL_PLATFORM_WAYLAND_KHR)
+        return eglGetDisplay((EGLNativeDisplayType)native);
+
+#ifdef ILAND_HAVE_WL_WINSYS
+    if (!native) return EGL_NO_DISPLAY;
+
+    EGLShimDisplay *dpy = calloc(1, sizeof(*dpy));
+    if (!dpy) return EGL_NO_DISPLAY;
+
+    dpy->kind = EGL_SHIM_DISPLAY_WAYLAND;
+    dpy->wl_display = (struct wl_display *)native;
+    dpy->angle_display = real_eglGetDisplay(EGL_DEFAULT_DISPLAY);
+
+    return (EGLDisplay)dpy;
+#else
+    (void)native;
+    return EGL_NO_DISPLAY;
+#endif
+}
+
+EGLDisplay eglGetPlatformDisplay(EGLenum platform, void *native_display,
+                                 const EGLAttrib *attrib_list)
+{
+    (void)attrib_list;
+    return shim_get_platform_display(platform, native_display);
+}
+
+EGLDisplay eglGetPlatformDisplayEXT(EGLenum platform, void *native_display,
+                                    const EGLint *attrib_list)
+{
+    (void)attrib_list;
+    return shim_get_platform_display(platform, native_display);
 }
 
 EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
@@ -363,7 +422,20 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
     load_gles2();
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglInitialize(dpy, major, minor);
-    return real_eglInitialize(sd->angle_display, major, minor);
+    if (!real_eglInitialize(sd->angle_display, major, minor))
+        return EGL_FALSE;
+
+#ifdef ILAND_HAVE_WL_WINSYS
+    if (sd->kind == EGL_SHIM_DISPLAY_WAYLAND && !sd->wl_winsys) {
+        /* Bind linux-dmabuf now so a compositor without it fails here, where
+         * clients check, instead of at first swap. */
+        sd->wl_winsys = iland_wl_winsys_create(sd->wl_display);
+        if (!sd->wl_winsys)
+            return EGL_FALSE;
+    }
+#endif
+
+    return EGL_TRUE;
 }
 
 EGLBoolean eglTerminate(EGLDisplay dpy)
@@ -373,6 +445,9 @@ EGLBoolean eglTerminate(EGLDisplay dpy)
     if (!sd) return real_eglTerminate(dpy);
     EGLBoolean ret = real_eglTerminate(sd->angle_display);
     if (g_pixels) { free(g_pixels); g_pixels = NULL; g_pixels_sz = 0; }
+#ifdef ILAND_HAVE_WL_WINSYS
+    if (sd->wl_winsys) iland_wl_winsys_destroy(sd->wl_winsys);
+#endif
     free(sd);
     return ret;
 }
@@ -385,7 +460,21 @@ EGLint eglGetError(void)
 
 const char *eglQueryString(EGLDisplay dpy, EGLint name)
 {
-    if (dpy == EGL_NO_DISPLAY) return NULL;
+    /*
+     * Client extension string (EGL 1.5 / EGL_EXT_client_extensions). Clients
+     * probe this before they have a display to decide whether they may call
+     * eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, ...) — weston's
+     * weston_platform_get_egl_display does exactly that, and without an answer
+     * it falls back to eglGetDisplay and loses the platform distinction.
+     */
+    if (dpy == EGL_NO_DISPLAY) {
+#ifdef ILAND_HAVE_WL_WINSYS
+        if (name == EGL_EXTENSIONS)
+            return "EGL_EXT_client_extensions EGL_EXT_platform_base "
+                   "EGL_KHR_platform_wayland EGL_EXT_platform_wayland";
+#endif
+        return NULL;
+    }
     if (!real_eglQueryString) return NULL;
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglQueryString(dpy, name);
@@ -498,18 +587,19 @@ EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx)
     return real_eglDestroyContext(sd->angle_display, ctx);
 }
 
-/* Zero-copy: get/create the ANGLE IOSurface-client-buffer pbuffer for gbm bo
- * index `idx`. ANGLE renders the default framebuffer straight into the
- * IOSurface-backed Metal texture — no glReadPixels, no CPU channel swap. */
-static EGLSurface zc_pbuffer_for_bo(EGLShimDisplay *sd, EGLShimSurface *ss,
-                                    int idx, struct gbm_bo *bo)
+/* Zero-copy: get/create the ANGLE IOSurface-client-buffer pbuffer for buffer
+ * slot `idx`. ANGLE renders the default framebuffer straight into the
+ * IOSurface-backed Metal texture — no glReadPixels, no CPU channel swap.
+ * Slots are gbm bos on the KMS path and swapchain buffers on Wayland. */
+static EGLSurface zc_pbuffer_for_iosurface(EGLShimDisplay *sd,
+                                           EGLShimSurface *ss,
+                                           int idx, IOSurfaceRef io)
 {
     if (idx < 0 || idx >= (int)(sizeof(ss->iosurf_pbuffers) /
                                 sizeof(ss->iosurf_pbuffers[0])))
         return EGL_NO_SURFACE;
     if (ss->iosurf_pbuffers[idx]) return ss->iosurf_pbuffers[idx];
 
-    IOSurfaceRef io = gbm_bo_get_iosurface(bo);
     if (!io || !real_eglCreatePbufferFromClientBuffer) return EGL_NO_SURFACE;
 
     const EGLint attribs[] = {
@@ -530,6 +620,44 @@ static EGLSurface zc_pbuffer_for_bo(EGLShimDisplay *sd, EGLShimSurface *ss,
     return s;
 }
 
+static EGLSurface zc_pbuffer_for_bo(EGLShimDisplay *sd, EGLShimSurface *ss,
+                                    int idx, struct gbm_bo *bo)
+{
+    return zc_pbuffer_for_iosurface(sd, ss, idx, gbm_bo_get_iosurface(bo));
+}
+
+#ifdef ILAND_HAVE_WL_WINSYS
+static void zc_drop_pbuffers(EGLShimDisplay *sd, EGLShimSurface *ss)
+{
+    for (size_t i = 0; i < sizeof(ss->iosurf_pbuffers) /
+                           sizeof(ss->iosurf_pbuffers[0]); i++) {
+        if (ss->iosurf_pbuffers[i]) {
+            real_eglDestroySurface(sd->angle_display, ss->iosurf_pbuffers[i]);
+            ss->iosurf_pbuffers[i] = NULL;
+        }
+    }
+}
+
+/* Bind swapchain slot `slot` as the current draw/read surface. The default
+ * framebuffer changes with every slot, so the context has to be re-made
+ * current — same requirement as advancing a gbm bo. */
+static EGLBoolean wl_bind_slot(EGLShimDisplay *sd, EGLShimSurface *ss, int slot)
+{
+    IOSurfaceRef io = iland_wl_swapchain_iosurface(ss->wl_swapchain, slot);
+    EGLSurface pb = zc_pbuffer_for_iosurface(sd, ss, slot, io);
+    if (!pb) return EGL_FALSE;
+
+    ss->wl_slot = slot;
+    ss->angle_surface = pb;
+
+    EGLContext cur = real_eglGetCurrentContext ? real_eglGetCurrentContext()
+                                               : EGL_NO_CONTEXT;
+    if (cur != EGL_NO_CONTEXT)
+        real_eglMakeCurrent(sd->angle_display, pb, pb, cur);
+    return EGL_TRUE;
+}
+#endif
+
 EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
                                    EGLNativeWindowType win,
                                    const EGLint *attrib_list)
@@ -537,6 +665,40 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     WWN_REQUIRE_ANGLE(EGL_NO_SURFACE);
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglCreateWindowSurface(dpy, config, win, attrib_list);
+
+#ifdef ILAND_HAVE_WL_WINSYS
+    if (sd->kind == EGL_SHIM_DISPLAY_WAYLAND) {
+        struct wl_egl_window *wlwin = (struct wl_egl_window *)win;
+        if (!sd->wl_winsys || !iland_wl_egl_window_is_valid(wlwin))
+            return EGL_NO_SURFACE;
+
+        EGLShimSurface *ws = calloc(1, sizeof(*ws));
+        if (!ws) return EGL_NO_SURFACE;
+
+        ws->wayland = 1;
+        ws->zerocopy = 1;
+        ws->config = config;
+        ws->wl_window = wlwin;
+        ws->wl_swapchain = iland_wl_swapchain_create(sd->wl_winsys, wlwin);
+        if (!ws->wl_swapchain) {
+            free(ws);
+            return EGL_NO_SURFACE;
+        }
+        iland_wl_swapchain_get_size(ws->wl_swapchain, &ws->width, &ws->height);
+
+        /* Bind slot 0 without a current context; eglMakeCurrent picks it up. */
+        IOSurfaceRef io = iland_wl_swapchain_iosurface(ws->wl_swapchain, 0);
+        EGLSurface pb = zc_pbuffer_for_iosurface(sd, ws, 0, io);
+        if (!pb) {
+            iland_wl_swapchain_destroy(ws->wl_swapchain);
+            free(ws);
+            return EGL_NO_SURFACE;
+        }
+        ws->wl_slot = 0;
+        ws->angle_surface = pb;
+        return (EGLSurface)ws;
+    }
+#endif
 
     struct gbm_surface *gs = (struct gbm_surface *)win;
     if (!gs) return EGL_NO_SURFACE;
@@ -587,6 +749,15 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
     EGLShimSurface *ss = unwrap_surface(surface);
     if (!ss) return real_eglDestroySurface(dpy, surface);
 
+#ifdef ILAND_HAVE_WL_WINSYS
+    if (ss->wayland) {
+        zc_drop_pbuffers(sd, ss);
+        iland_wl_swapchain_destroy(ss->wl_swapchain);
+        free(ss);
+        return EGL_TRUE;
+    }
+#endif
+
     if (ss->zerocopy) {
         for (size_t i = 0; i < sizeof(ss->iosurf_pbuffers) /
                                sizeof(ss->iosurf_pbuffers[0]); i++) {
@@ -625,6 +796,28 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
 
     EGLShimSurface *ss = unwrap_surface(surface);
     if (!ss) return real_eglSwapBuffers(dpy, surface);
+
+#ifdef ILAND_HAVE_WL_WINSYS
+    if (ss->wayland) {
+        /* ANGLE rendered straight into the slot's IOSurface. Land the GPU work,
+         * hand the buffer to the compositor, then draw into a released slot. */
+        if (g_glFinish) g_glFinish();
+        else if (real_eglWaitGL) real_eglWaitGL();
+
+        iland_wl_swapchain_post(ss->wl_swapchain, ss->wl_slot);
+
+        if (iland_wl_swapchain_check_resize(ss->wl_swapchain)) {
+            /* New IOSurfaces: the cached pbuffers point at freed surfaces. */
+            zc_drop_pbuffers(sd, ss);
+            iland_wl_swapchain_get_size(ss->wl_swapchain,
+                                        &ss->width, &ss->height);
+        }
+
+        int slot = iland_wl_swapchain_acquire(ss->wl_swapchain);
+        if (slot < 0) return EGL_FALSE;
+        return wl_bind_slot(sd, ss, slot);
+    }
+#endif
 
     struct gbm_surface *gs = ss->gbm_surface;
 
