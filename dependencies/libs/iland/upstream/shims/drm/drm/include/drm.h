@@ -15,4 +15,8 @@ int drm_send_json(const char *json);
  * IOSurfaceRef itself remains valid in the caller's process. */
 int drm_send_json_with_surface(const char *json, mach_port_t surface_port);
 
+/* Wait for framebufferd to acknowledge that the most recently submitted
+ * surface reached its host display present point. Runtime Mach IPC only. */
+int drm_receive_present_ack(unsigned timeout_ms);
+
 #endif

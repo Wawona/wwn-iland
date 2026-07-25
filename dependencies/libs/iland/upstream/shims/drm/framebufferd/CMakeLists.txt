@@ -11,7 +11,7 @@ target_link_libraries(framebufferd PRIVATE
   "-framework Foundation"
   "-framework QuartzCore"
   "-framework IOSurface"
-  "-framework IOKit"
   "-framework CoreGraphics"
+  "-framework CoreVideo"
 )
 

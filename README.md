@@ -2,7 +2,7 @@
 
 Wawona's userland Linux-graphics compatibility layer: GBM / EGL / DRM-KMS over
 Apple `IOSurface` + ANGLE, providing the "Mode A" in-window present path that
-replaces the macOS WindowServer/SkyLight stack for Wayland/Weston GL clients
+stays inside the host app for Wayland/Weston GL clients
 (kmscube, es2gears, weston-simple-egl) on Apple platforms.
 
 Extracted from the Wawona monorepo. Built with [wwn-toolchain](https://github.com/Wawona/wwn-toolchain).
@@ -18,10 +18,16 @@ L2 wwn-kmscube → L3 wwn-weston → L4 Wawona
 ```
 
 `wwn-iland` is **L1: the complete Wawona graphics stack** (userland
-DRM/KMS/GBM/EGL present + Mode A/B; ANGLE + Vulkan ICDs after P2). It depends on
+DRM/KMS/GBM/EGL present + Mode A/B; ANGLE, SwiftShader, MoltenVK, and Vulkan ICD
+packaging). It depends on
 `wwn-toolchain` (L0) only. Never add weston/kmscube/waypipe/Wawona as a flake
 input, and never move substrate libs (pixman/cairo/pango) into this repo.
 Canonical: `Wawona/docs/wwn-repo-dag.md`; workspace rule `wawona-repo-dag`.
+
+The DRM/KMS/GBM device is runtime-only userland emulation. Wawona code never
+opens real `/dev/dri` or `/dev/kgsl`, forwards real DRM/KMS/KGSL ioctls, ships
+kernel code, or requires kernel patches. Direct Turnip/KGSL is therefore out
+of scope; use system Metal/Vulkan or SwiftShader.
 
 ## Credit / upstream
 
@@ -55,6 +61,9 @@ extraArgs = { ilandSrc = wwn-iland; };  # weston copies upstream/shims/* from he
 
 - `registryFragment.iland` — Mode A per-platform userland archives (iOS family +
   macOS + Android). App-Store-safe in-window present.
+- `registryFragment.angle` / `registryFragment.swiftshader` — L1-owned graphics
+  translator and software Vulkan recipes. Consumers must merge this fragment;
+  toolchain `baseRegistry` contains fail-loud ownership sentinels only.
 - `registryFragment.iland-baremetal` — **macOS only** Mode B
   `libwayland-mac.dylib` (Dobby + embedded `framebufferd` / `inputd` /
   `amfiexceptiond`). Desktop Replacement / WindowServer path. Never built for

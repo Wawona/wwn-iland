@@ -57,6 +57,14 @@ typedef void (*iland_cursor_callback_t)(int32_t op,
  */
 void iland_drm_set_present_callback(iland_present_callback_t cb, void *user);
 
+/*
+ * Complete the one outstanding KMS page flip after the host presentation
+ * engine has latched it. Mode A presenters call this from Metal command-buffer
+ * completion or after the Android swapchain present. Mode B completes from its
+ * display cadence worker. Duplicate/late notifications are ignored.
+ */
+void iland_drm_complete_page_flip(uint32_t crtc_id, uint32_t fb_id);
+
 /* Register (or clear) the optional in-window cursor callback. */
 void iland_drm_set_cursor_callback(iland_cursor_callback_t cb, void *user);
 

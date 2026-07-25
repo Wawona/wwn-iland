@@ -25,6 +25,7 @@
 #define eglCreatePbufferSurface        angle_eglCreatePbufferSurface
 #define eglCreatePbufferFromClientBuffer angle_eglCreatePbufferFromClientBuffer
 #define eglGetCurrentContext           angle_eglGetCurrentContext
+#define eglGetProcAddress              angle_eglGetProcAddress
 #endif
 
 #include <egl_shim.h>
@@ -57,6 +58,7 @@
 #undef eglCreatePbufferSurface
 #undef eglCreatePbufferFromClientBuffer
 #undef eglGetCurrentContext
+#undef eglGetProcAddress
 #endif
 
 static void *g_angle_handle = NULL;
@@ -93,6 +95,7 @@ ANGLE_FN(eglSwapInterval);
 ANGLE_FN(eglCreatePbufferSurface);
 ANGLE_FN(eglCreatePbufferFromClientBuffer);
 ANGLE_FN(eglGetCurrentContext);
+ANGLE_FN(eglGetProcAddress);
 
 static void (*g_glReadPixels)(int, int, int, int, unsigned int, unsigned int, void *) = NULL;
 static void (*g_glFinish)(void) = NULL;
@@ -154,9 +157,19 @@ static inline uint32_t rgba_to_bgra(uint32_t rgba)
 /* Permute map: RGBA → BGRA (swap byte 0 and byte 2) */
 static const uint8_t kRGBAToBGRAMap[4] = { 2, 1, 0, 3 };
 
+static int graphics_policy_allows_angle(void)
+{
+    const char *disabled = getenv("WWN_DISABLE_EGL");
+    const char *driver = getenv("WWN_OPENGL_DRIVER");
+    if (disabled && disabled[0] == '1') return 0;
+    if (!driver || !driver[0]) return 1;
+    return strcmp(driver, "angle") == 0;
+}
+
 #ifdef ILAND_ANGLE_STATIC
 static int load_angle(void)
 {
+    if (!graphics_policy_allows_angle()) return -1;
     if (g_angle_handle) return 0;
     g_angle_handle = (void *)1;
 
@@ -182,6 +195,7 @@ static int load_angle(void)
     LOAD(eglCreatePbufferSurface);
     LOAD(eglCreatePbufferFromClientBuffer);
     LOAD(eglGetCurrentContext);
+    LOAD(eglGetProcAddress);
 
     return 0;
 }
@@ -202,6 +216,7 @@ static void *open_angle_library(const char *path)
 
 static int load_angle(void)
 {
+    if (!graphics_policy_allows_angle()) return -1;
     if (g_angle_handle) return 0;
 #if TARGET_OS_IPHONE
     static const char *candidates[] = {
@@ -243,6 +258,7 @@ static int load_angle(void)
     LOAD(eglCreatePbufferSurface);
     LOAD(eglCreatePbufferFromClientBuffer);
     LOAD(eglGetCurrentContext);
+    LOAD(eglGetProcAddress);
 
     return 0;
 }
@@ -642,4 +658,11 @@ EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval)
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglSwapInterval(dpy, interval);
     return real_eglSwapInterval(sd->angle_display, interval);
+}
+
+__eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *procname)
+{
+    if (!procname || load_angle() < 0 || !real_eglGetProcAddress)
+        return NULL;
+    return real_eglGetProcAddress(procname);
 }

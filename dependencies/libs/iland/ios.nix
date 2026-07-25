@@ -58,11 +58,6 @@ pkgs.stdenv.mkDerivation {
   postPatch = ''
     find shims -type f \( -name '*.h' -o -name '*.m' -o -name '*.c' \) \
       -exec sed -i 's|IOSurface/IOSurface.h|IOSurface/IOSurfaceRef.h|g' {} +
-    sed -i '/static uint32_t get_display_refresh_rate(void)/,/^}/c\
-static uint32_t get_display_refresh_rate(void)\
-{\
-    return 60;\
-}' shims/drm/drm/src/drm_linux.c
 
     # iOS has no bootstrap.h — stub Mode B Mach IPC helpers (Mode A uses present callback).
     cat > shims/drm/drm/src/drm_ios_ipc_stubs.c <<'EOF'
@@ -130,7 +125,7 @@ EOF
   '';
 
   installPhase = ''
-    mkdir -p $out/lib $out/include/EGL $out/include/GLES2 $out/include/GLES3 $out/include/KHR
+    mkdir -p $out/lib/pkgconfig $out/include/EGL $out/include/GLES2 $out/include/GLES3 $out/include/KHR
 
     cp libiland_userland.a $out/lib/
 
@@ -146,6 +141,18 @@ EOF
     # Mode A store-safe open() redirect — force-included by GL/DRM clients so
     # their raw open("/dev/dri/cardN") reaches the in-process virtual fd (#58).
     cp shims/drm/drm/include/iland_drm_open_compat.h $out/include/
+
+    cat > $out/lib/pkgconfig/gbm.pc <<EOF
+prefix=$out
+libdir=\''${prefix}/lib
+includedir=\''${prefix}/include
+
+Name: gbm
+Description: wwn-iland IOSurface-backed GBM ABI
+Version: 1.0.0
+Libs: -L\''${libdir} -liland_userland
+Cflags: -I\''${includedir}
+EOF
 
     cp -r ${angle}/include/EGL/.   $out/include/EGL/
     cp -r ${angle}/include/GLES2/. $out/include/GLES2/

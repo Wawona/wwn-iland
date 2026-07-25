@@ -3,11 +3,21 @@
 
 #include <bootstrap.h>
 #include <mach/mach.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
 /* Cached bootstrap port — avoids a Mach lookup on every IPC send. */
 static mach_port_t g_cached_port = MACH_PORT_NULL;
+static mach_port_t g_present_ack_port = MACH_PORT_NULL;
+static pthread_once_t g_present_ack_once = PTHREAD_ONCE_INIT;
+
+static void create_present_ack_port(void)
+{
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                           &g_present_ack_port) != KERN_SUCCESS)
+        g_present_ack_port = MACH_PORT_NULL;
+}
 
 static int send_msg(drm_ipc_msg_t *msg, size_t msg_size)
 {
@@ -101,10 +111,14 @@ int drm_send_json_with_surface(const char *json, mach_port_t surface_port)
         return drm_send_json(json);
 
     /* Build complex message with a port descriptor for the IOSurface */
+    pthread_once(&g_present_ack_once, create_present_ack_port);
+    mach_msg_type_name_t reply_disposition =
+        g_present_ack_port == MACH_PORT_NULL ? 0 : MACH_MSG_TYPE_MAKE_SEND_ONCE;
     msg.header.msgh_bits = MACH_MSGH_BITS_COMPLEX
-                         | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+                         | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+                                          reply_disposition);
     msg.header.msgh_remote_port = MACH_PORT_NULL;
-    msg.header.msgh_local_port  = MACH_PORT_NULL;
+    msg.header.msgh_local_port  = g_present_ack_port;
     msg.header.msgh_id          = DRM_IPC_MSG_ID;
 
     msg.body.msgh_descriptor_count = 1;
@@ -119,4 +133,21 @@ int drm_send_json_with_surface(const char *json, mach_port_t surface_port)
     /* mach_msg requires 4-byte aligned message size */
     msg_size = (msg_size + 3) & ~(size_t)3;
     return send_msg(&msg, msg_size);
+}
+
+int drm_receive_present_ack(unsigned timeout_ms)
+{
+    pthread_once(&g_present_ack_once, create_present_ack_port);
+    if (g_present_ack_port == MACH_PORT_NULL)
+        return -1;
+
+    mach_msg_header_t ack = {0};
+    kern_return_t kr = mach_msg(&ack,
+                                MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+                                0,
+                                sizeof(ack),
+                                g_present_ack_port,
+                                timeout_ms,
+                                MACH_PORT_NULL);
+    return kr == KERN_SUCCESS && ack.msgh_id == DRM_IPC_MSG_ID + 1 ? 0 : -1;
 }

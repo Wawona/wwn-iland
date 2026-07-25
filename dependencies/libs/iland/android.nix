@@ -36,13 +36,6 @@ pkgs.stdenv.mkDerivation {
     cp -f ${androidDir}/gbm_priv.h shims/gbm/include/gbm_priv.h
     cp -f ${androidDir}/iosurface_compat.h shims/include/iosurface_compat.h
 
-    # Android has no WindowServer plist / CoreGraphics refresh probe.
-    sed -i '/static uint32_t get_display_refresh_rate(void)/,/^}/c\
-static uint32_t get_display_refresh_rate(void)\
-{\
-    return 60;\
-}' shims/drm/drm/src/drm_linux.c
-
     # Drop macOS WindowServer plist probe; keep preferred-mode + default sizes.
     python3 - <<'PY'
 from pathlib import Path

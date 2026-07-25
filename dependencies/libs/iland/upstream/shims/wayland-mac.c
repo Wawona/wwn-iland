@@ -128,10 +128,13 @@ static int hooked_open(const char *path, int flags, ...)
     int mode = (flags & O_CREAT) ? va_arg(ap, int) : 0;
     va_end(ap);
 
-    if (path && strncmp(path, "/dev/dri/card", 13) == 0) {
-        const char *rest = path + 13;
-        if (*rest >= '0' && *rest <= '9')
+    if (path && strncmp(path, "/dev/dri/", 9) == 0) {
+        const char *rest = path + 9;
+        if (strncmp(rest, "card", 4) == 0 &&
+            rest[4] >= '0' && rest[4] <= '9')
             return DRM_VIRTUAL_FD;
+        errno = ENODEV;
+        return -1;
     }
     return wrap_real_open(path, flags, mode);
 }

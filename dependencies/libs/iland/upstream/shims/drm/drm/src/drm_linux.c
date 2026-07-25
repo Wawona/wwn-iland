@@ -8,6 +8,7 @@
 #include <IOSurface/IOSurface.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -22,6 +23,9 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 
 /* ── Mode A in-window present hook (see iland_present.h) ───────────────── */
 
@@ -71,6 +75,7 @@ void iland_drm_set_preferred_mode(uint32_t w, uint32_t h, uint32_t refresh)
 static uint32_t get_display_refresh_rate(void)
 {
     uint32_t refresh = 60;
+#if defined(__APPLE__) && TARGET_OS_OSX
     CGDirectDisplayID main_display = CGMainDisplayID();
     CGDisplayModeRef mode = CGDisplayCopyDisplayMode(main_display);
     if (mode) {
@@ -86,6 +91,7 @@ static uint32_t get_display_refresh_rate(void)
     if (refresh < 60) {
         refresh = 60;
     }
+#endif
     return refresh;
 }
 
@@ -217,9 +223,109 @@ int iland_drm_prepare_virtual_fd(void)
     return 0;
 }
 
-/* Pending page-flip user_data — drmModePageFlip stores it, drmHandleEvent
- * passes it to the event handler.  Only one outstanding flip at a time. */
+/*
+ * One outstanding page flip, matching the legacy KMS contract. Completion is
+ * emitted only after the host presenter latches the matching framebuffer.
+ */
+static pthread_mutex_t g_flip_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_mode_b_flip_cond = PTHREAD_COND_INITIALIZER;
 static void *g_pending_flip_data = NULL;
+static uint32_t g_pending_flip_crtc;
+static uint32_t g_pending_flip_fb;
+static bool g_pending_flip_armed;
+static bool g_pending_flip_signaled;
+static bool g_mode_b_flip_queued;
+static pthread_t g_mode_b_flip_thread;
+static pthread_once_t g_mode_b_flip_once = PTHREAD_ONCE_INIT;
+
+static uint32_t get_display_refresh_rate(void);
+
+static int arm_page_flip(uint32_t crtc_id, uint32_t fb_id, void *user_data)
+{
+    pthread_mutex_lock(&g_flip_lock);
+    if (g_pending_flip_armed) {
+        pthread_mutex_unlock(&g_flip_lock);
+        errno = EBUSY;
+        return -1;
+    }
+    g_pending_flip_data = user_data;
+    g_pending_flip_crtc = crtc_id;
+    g_pending_flip_fb = fb_id;
+    g_pending_flip_armed = true;
+    g_pending_flip_signaled = false;
+    pthread_mutex_unlock(&g_flip_lock);
+    return 0;
+}
+
+static void cancel_page_flip(uint32_t crtc_id, uint32_t fb_id)
+{
+    pthread_mutex_lock(&g_flip_lock);
+    if (g_pending_flip_armed &&
+        g_pending_flip_crtc == crtc_id &&
+        g_pending_flip_fb == fb_id) {
+        g_pending_flip_data = NULL;
+        g_pending_flip_armed = false;
+        g_pending_flip_signaled = false;
+    }
+    pthread_mutex_unlock(&g_flip_lock);
+}
+
+void iland_drm_complete_page_flip(uint32_t crtc_id, uint32_t fb_id)
+{
+    pthread_mutex_lock(&g_flip_lock);
+    if (!g_pending_flip_armed || g_pending_flip_signaled ||
+        g_pending_flip_crtc != crtc_id || g_pending_flip_fb != fb_id) {
+        pthread_mutex_unlock(&g_flip_lock);
+        return;
+    }
+    g_pending_flip_signaled = true;
+    int event_fd = g_drm_event_pipe_write;
+    pthread_mutex_unlock(&g_flip_lock);
+
+    if (event_fd >= 0) {
+        const char byte = 1;
+        ssize_t written = write(event_fd, &byte, 1);
+        (void)written;
+    }
+}
+
+static void *mode_b_flip_worker(void *unused)
+{
+    (void)unused;
+    for (;;) {
+        pthread_mutex_lock(&g_flip_lock);
+        while (!g_mode_b_flip_queued)
+            pthread_cond_wait(&g_mode_b_flip_cond, &g_flip_lock);
+        uint32_t crtc_id = g_pending_flip_crtc;
+        uint32_t fb_id = g_pending_flip_fb;
+        g_mode_b_flip_queued = false;
+        pthread_mutex_unlock(&g_flip_lock);
+
+#if defined(__APPLE__)
+        if (drm_receive_present_ack(1000) != 0)
+            fprintf(stderr,
+                    "[drm] framebufferd present ACK timed out; completing flip\n");
+#endif
+        iland_drm_complete_page_flip(crtc_id, fb_id);
+    }
+    return NULL;
+}
+
+static void start_mode_b_flip_worker(void)
+{
+    if (pthread_create(&g_mode_b_flip_thread, NULL,
+                       mode_b_flip_worker, NULL) == 0)
+        pthread_detach(g_mode_b_flip_thread);
+}
+
+static void schedule_mode_b_page_flip(void)
+{
+    pthread_once(&g_mode_b_flip_once, start_mode_b_flip_worker);
+    pthread_mutex_lock(&g_flip_lock);
+    g_mode_b_flip_queued = true;
+    pthread_cond_signal(&g_mode_b_flip_cond);
+    pthread_mutex_unlock(&g_flip_lock);
+}
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
 
@@ -754,12 +860,13 @@ int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
 {
     if (check_fd(fd) < 0) return -1;
     if (crtc_id != 1) { errno = ENOENT; return -1; }
+    bool wants_event = (flags & DRM_MODE_PAGE_FLIP_EVENT) != 0;
+    if (wants_event && arm_page_flip(crtc_id, fb_id, user_data) < 0)
+        return -1;
 
     g_state.crtc_fb_id = fb_id;
 
     IOSurfaceRef surf = fb_id_to_surface(fb_id);
-
-    g_pending_flip_data = user_data;
 
     int ret;
     if (g_present_cb) {
@@ -784,12 +891,10 @@ int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
             mach_port_deallocate(mach_task_self(), surface_port);
     }
 
-    /* Signal page flip completion immediately (TODO: real vsync) */
-    if (ret == 0 && g_drm_event_pipe_write >= 0) {
-        char byte = 1;
-        ssize_t w = write(g_drm_event_pipe_write, &byte, 1);
-        (void)w;
-    }
+    if (ret != 0 && wants_event)
+        cancel_page_flip(crtc_id, fb_id);
+    else if (ret == 0 && wants_event && !g_present_cb)
+        schedule_mode_b_page_flip();
 
     return ret;
 }
@@ -809,8 +914,12 @@ int drmHandleEvent(int fd, drmEventContextPtr evctx)
     if (byte == 1 && evctx) {
         struct timeval tv;
         gettimeofday(&tv, NULL);
+        pthread_mutex_lock(&g_flip_lock);
         void *data = g_pending_flip_data;
         g_pending_flip_data = NULL;
+        g_pending_flip_armed = false;
+        g_pending_flip_signaled = false;
+        pthread_mutex_unlock(&g_flip_lock);
         /* page_flip_handler2 (v2+) provides CRTC ID required for atomic mode */
         if (evctx->version >= 2 && evctx->page_flip_handler2) {
             evctx->page_flip_handler2(fd, 0,
@@ -1508,6 +1617,20 @@ int drmModeAtomicCommit(int fd, drmModeAtomicReq *req,
     for (int j = 0; j < g_obj_prop_count; j++)
         if (g_obj_props[j].obj_id == 2) { cursor_props = &g_obj_props[j]; break; }
 
+    uint32_t event_fb_id = 0;
+    if (flags & DRM_MODE_PAGE_FLIP_EVENT) {
+        for (int i = 0; i < req->prop_count; i++) {
+            if (req->prop_ids[i] == g_cached_prop_ids.fb_id &&
+                req->obj_ids[i] != 2) {
+                event_fb_id = (uint32_t)req->values[i];
+                break;
+            }
+        }
+        if (event_fb_id > 0 &&
+            arm_page_flip(1, event_fb_id, user_data) < 0)
+            return -1;
+    }
+
     /* Apply all property changes */
     uint32_t new_fb_id = 0;
     uint32_t new_plane_id = 0;
@@ -1532,7 +1655,8 @@ int drmModeAtomicCommit(int fd, drmModeAtomicReq *req,
             bool is_cursor = (obj_id == 2);
             IOSurfaceRef surf = fb_id_to_surface((uint32_t)val);
             if (surf) {
-                if (g_present_cb || (is_cursor && g_cursor_cb)) {
+                if ((!is_cursor && g_present_cb) ||
+                    (is_cursor && g_cursor_cb)) {
                     /* Mode A — present in-window, in-process. */
                     if (is_cursor) {
                         if (g_cursor_cb)
@@ -1592,15 +1716,9 @@ int drmModeAtomicCommit(int fd, drmModeAtomicReq *req,
         }
     }
 
-    /* Signal page flip completion when PAGE_FLIP_EVENT is requested */
-    if (flags & DRM_MODE_PAGE_FLIP_EVENT) {
-        g_pending_flip_data = user_data;
-        if (g_drm_event_pipe_write >= 0) {
-            char byte = 1;
-            ssize_t w = write(g_drm_event_pipe_write, &byte, 1);
-            (void)w;
-        }
-    }
+    if ((flags & DRM_MODE_PAGE_FLIP_EVENT) &&
+        event_fb_id > 0 && !g_present_cb)
+        schedule_mode_b_page_flip();
 
     return 0;
 }

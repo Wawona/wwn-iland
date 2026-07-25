@@ -5,7 +5,7 @@ Guidance for AI agents editing this repository.
 ## What this repo is
 
 Wawona’s Linux-graphics compat layer (GBM / EGL / DRM-KMS over IOSurface +
-ANGLE on Apple, Android stubs). Fork lineage:
+ANGLE on Apple and AHardwareBuffer/Surface on Android). Fork lineage:
 [CoreBedtime/iland](https://github.com/CoreBedtime/iland) → deleted
 `Wawona/iland` → **this repo**.
 
@@ -33,16 +33,16 @@ Canonical prose (integration side):
 ## Repo DAG layer (L1) — never invert
 
 `wwn-iland` is **L1: the complete Wawona graphics stack** (iland userland
-DRM/KMS/GBM/EGL present + Mode A/B; after P2 also `angle`, `swiftshader`,
-`moltenvk`, `kosmickrisp`, Turnip hooks, `iland-cpu`). It depends on
+DRM/KMS/GBM/EGL present + Mode A/B; `angle`, `swiftshader`,
+`moltenvk`, `kosmickrisp`, `iland-cpu`). It depends on
 **`wwn-toolchain` (L0) ONLY**.
 
 - **Never** add `wwn-weston`, `wwn-kmscube`, `wwn-waypipe`, or `Wawona` as a
   flake input of this repo (that would make iland depend on its consumers).
 - **Never** move substrate libs (`pixman`, `cairo`, `pango`, `libwayland`) into
   this repo — they stay L0; `iland-cpu` *links* toolchain `pixman`.
-- Graphics keys (`angle`/`swiftshader`) move here from toolchain in P2; after
-  the move, consumers merge this repo's `registryFragment`, not bare toolchain.
+- Graphics keys (`angle`/`swiftshader`) live here; consumers merge this repo's
+  `registryFragment`, not bare toolchain.
 
 Canonical: `Wawona/docs/wwn-repo-dag.md` + workspace rule `wawona-repo-dag`.
 
@@ -58,6 +58,10 @@ Canonical: `Wawona/docs/wwn-repo-dag.md` + workspace rule `wawona-repo-dag`.
 
 - **Do** keep Mode A App-Store-safe (no injection, no priv daemons in the
   default archive).
+- **Do** keep all DRM/KMS/GBM behavior runtime-only and in userland. Never open
+  real `/dev/dri` or `/dev/kgsl` nodes, forward real DRM/KMS/KGSL ioctls, ship
+  kernel code, or require kernel patches. Direct Turnip/KGSL is out of scope;
+  use system Vulkan/Metal or SwiftShader.
 - **Do** build Mode B only via `macos-baremetal.nix` / `iland-baremetal-macos`.
 - **Don’t** MacPorts-assume `/opt/local` in new code; Nix-substitute ANGLE paths.
 - **Don’t** document Mode B as the default present path for Wawona apps.

@@ -68,23 +68,42 @@
     {
       # Registry fragment merged by Wawona / standalone builds over baseRegistry.
       registryFragment = {
-        # L1 graphics implementations. Recipes remain imported from the pinned
-        # L0 source during migration, but only iland owns/registers these keys;
-        # consumers cannot select them without the L1 fragment.
+        # L1 graphics implementations. Consumers cannot select these drivers
+        # without merging iland's registry fragment.
         angle = withPlatformVariants {
-          android = "${wwn-toolchain}/dependencies/libs/angle/android.nix";
-          ios = "${wwn-toolchain}/dependencies/libs/angle/ios.nix";
-          ipados = "${wwn-toolchain}/dependencies/libs/angle/ios.nix";
-          tvos = "${wwn-toolchain}/dependencies/libs/angle/ios.nix";
-          visionos = "${wwn-toolchain}/dependencies/libs/angle/ios.nix";
-          watchos = "${wwn-toolchain}/dependencies/libs/angle/ios.nix";
-          macos = "${wwn-toolchain}/dependencies/libs/angle/macos.nix";
+          android = ./dependencies/libs/angle/android.nix;
+          ios = ./dependencies/libs/angle/ios.nix;
+          ipados = ./dependencies/libs/angle/ios.nix;
+          tvos = null;
+          visionos = ./dependencies/libs/angle/ios.nix;
+          watchos = null;
+          macos = ./dependencies/libs/angle/macos.nix;
         };
         swiftshader = withPlatformVariants {
-          android = "${wwn-toolchain}/dependencies/libs/swiftshader/android.nix";
-          wearos = "${wwn-toolchain}/dependencies/libs/swiftshader/wearos.nix";
+          android = ./dependencies/libs/swiftshader/android.nix;
+          wearos = ./dependencies/libs/swiftshader/wearos.nix;
           ios = null;
           macos = null;
+        };
+        moltenvk = withPlatformVariants {
+          ios = ./dependencies/libs/moltenvk/apple-mobile.nix;
+          ipados = ./dependencies/libs/moltenvk/apple-mobile.nix;
+          visionos = ./dependencies/libs/moltenvk/apple-mobile.nix;
+          macos = ./dependencies/libs/moltenvk/macos.nix;
+          tvos = null;
+          watchos = null;
+          android = null;
+        };
+        # KosmicKrisp is an L1 key. Unsupported variants fail instead of
+        # silently substituting MoltenVK.
+        kosmickrisp = withPlatformVariants {
+          macos = ./dependencies/libs/kosmickrisp/macos.nix;
+          ios = null;
+          ipados = null;
+          visionos = null;
+          tvos = null;
+          watchos = null;
+          android = null;
         };
         iland = withPlatformVariants {
           android = ./dependencies/libs/iland/android.nix;
@@ -117,10 +136,27 @@
         in
         ((if isDarwin then {
           iland-ios = tc.buildForIOS "iland" { };
+          iland-ios-sim = tc.buildForIOS "iland" { simulator = true; };
+          iland-ipados = tc.buildForIPadOS "iland" { };
+          iland-tvos = tc.buildForTVOS "iland" { };
+          iland-watchos = tc.buildForWatchOS "iland" { };
+          iland-visionos = tc.buildForVisionOS "iland" { };
+          iland-visionos-sim = tc.buildForVisionOS "iland" { simulator = true; };
           iland-macos = tc.buildForMacOS "iland" { };
           iland-baremetal-macos = tc.buildForMacOS "iland-baremetal" { };
+          angle-ios = tc.buildForIOS "angle" { };
+          angle-ios-sim = tc.buildForIOS "angle" { simulator = true; };
+          angle-visionos = tc.buildForVisionOS "angle" { };
+          angle-visionos-sim = tc.buildForVisionOS "angle" { simulator = true; };
+          moltenvk-ios = tc.buildForIOS "moltenvk" { };
+          moltenvk-ios-sim = tc.buildForIOS "moltenvk" { simulator = true; };
+          moltenvk-visionos = tc.buildForVisionOS "moltenvk" { };
+          moltenvk-visionos-sim = tc.buildForVisionOS "moltenvk" { simulator = true; };
+          moltenvk-macos = tc.buildForMacOS "moltenvk" { };
+          kosmickrisp-macos = tc.buildForMacOS "kosmickrisp" { };
         } else { }) // {
           iland-android = tc.buildForAndroid "iland" { };
+          swiftshader-android = tc.buildForAndroid "swiftshader" { };
         })
       );
 

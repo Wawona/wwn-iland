@@ -1,10 +1,6 @@
 #include "drm_ipc.h"
 #include "DisplaySurface.h"
 
-#include <IOKit/IOKitLib.h>
-#include <IOKit/graphics/IOGraphicsTypes.h>  // has all the structs + SInt32 IOIndex
-
-
 #include <bootstrap.h>
 #include <mach/mach.h>
 #include <stdint.h>
@@ -15,6 +11,7 @@
 #include <signal.h>
 
 #import <Foundation/Foundation.h>
+#import <CoreVideo/CoreVideo.h>
 #import <QuartzCore/QuartzCore.h>
 #import <IOSurface/IOSurface.h>
 #import <objc/message.h>
@@ -52,10 +49,13 @@ static id            g_display;          /* CAWindowServerDisplay */
 
 /* The latest client surface (retained) — directly presentable */
 static IOSurfaceRef  g_client_surface;
+static mach_port_t   g_present_reply_port = MACH_PORT_NULL;
 
 static pthread_mutex_t g_surface_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile bool g_running = true;
 static volatile bool g_dirty = false;
+static CFRunLoopRef g_main_run_loop;
+static CFRunLoopSourceRef g_present_source;
 
 static void handle_signal(int sig)
 {
@@ -78,6 +78,8 @@ static void TimerCallback(CFRunLoopTimerRef timer, void *info)
         pthread_mutex_lock(&g_surface_lock);
         IOSurfaceRef client = g_client_surface;
         if (client) CFRetain(client);
+        mach_port_t reply_port = g_present_reply_port;
+        g_present_reply_port = MACH_PORT_NULL;
         pthread_mutex_unlock(&g_surface_lock);
 
         if (!client) return;
@@ -87,7 +89,41 @@ static void TimerCallback(CFRunLoopTimerRef timer, void *info)
          * same format/properties as the display pipeline. */
         [g_display presentSurface:client withOptions:@{}];
         CFRelease(client);
+        if (reply_port != MACH_PORT_NULL) {
+            mach_msg_header_t ack = {0};
+            ack.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+            ack.msgh_size = sizeof(ack);
+            ack.msgh_remote_port = reply_port;
+            ack.msgh_id = DRM_IPC_MSG_ID + 1;
+            kern_return_t kr = mach_msg(&ack, MACH_SEND_MSG, ack.msgh_size, 0,
+                                        MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+                                        MACH_PORT_NULL);
+            if (kr != KERN_SUCCESS)
+                mach_port_deallocate(mach_task_self(), reply_port);
+        }
     }
+}
+
+static void PresentSourcePerform(void *info)
+{
+    (void)info;
+    TimerCallback(NULL, NULL);
+}
+
+static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink,
+                                    const CVTimeStamp *now,
+                                    const CVTimeStamp *outputTime,
+                                    CVOptionFlags flagsIn,
+                                    CVOptionFlags *flagsOut,
+                                    void *context)
+{
+    (void)displayLink; (void)now; (void)outputTime;
+    (void)flagsIn; (void)flagsOut; (void)context;
+    if (g_present_source && g_main_run_loop) {
+        CFRunLoopSourceSignal(g_present_source);
+        CFRunLoopWakeUp(g_main_run_loop);
+    }
+    return kCVReturnSuccess;
 }
 
 /* ── Mach message server thread ────────────────────────────────────────── */
@@ -135,7 +171,10 @@ static void *mach_server_thread(void *arg)
             /* Page flip — store the client surface for presentation */
             pthread_mutex_lock(&g_surface_lock);
             if (g_client_surface) CFRelease(g_client_surface);
+            if (g_present_reply_port != MACH_PORT_NULL)
+                mach_port_deallocate(mach_task_self(), g_present_reply_port);
             g_client_surface = client_surface;
+            g_present_reply_port = msg.header.msgh_remote_port;
             g_dirty = true;
             pthread_mutex_unlock(&g_surface_lock);
         } else {
@@ -288,25 +327,59 @@ int main(void)
         pthread_create(&thread, NULL, mach_server_thread, NULL);
         pthread_detach(thread);
 
-        /* ── Present timer — fires on main thread, presents latest surface ── */
-        CFRunLoopTimerRef timer = CFRunLoopTimerCreate(
-            kCFAllocatorDefault,
-            CFAbsoluteTimeGetCurrent(),
-            1.0 / 120,
-            0, 0,
-            TimerCallback,
-            NULL);
-        CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer,
-                          kCFRunLoopCommonModes);
+        /* Host-vsync source. Presentation stays on the main thread while the
+         * display-link callback only signals the run loop. */
+        g_main_run_loop = CFRunLoopGetCurrent();
+        CFRetain(g_main_run_loop);
+        CFRunLoopSourceContext source_context = {0};
+        source_context.perform = PresentSourcePerform;
+        g_present_source = CFRunLoopSourceCreate(kCFAllocatorDefault, 0,
+                                                 &source_context);
+        CFRunLoopAddSource(g_main_run_loop, g_present_source,
+                           kCFRunLoopCommonModes);
 
-        printf("[framebufferd] direct-present mode (zero-copy, 120Hz poll)\n");
+        CVDisplayLinkRef display_link = NULL;
+        CVReturn link_status =
+            CVDisplayLinkCreateWithActiveCGDisplays(&display_link);
+        if (link_status == kCVReturnSuccess) {
+            CVDisplayLinkSetOutputCallback(display_link, DisplayLinkCallback,
+                                           NULL);
+            link_status = CVDisplayLinkStart(display_link);
+        }
+
+        CFRunLoopTimerRef fallback_timer = NULL;
+        if (link_status != kCVReturnSuccess) {
+            fallback_timer = CFRunLoopTimerCreate(
+                kCFAllocatorDefault, CFAbsoluteTimeGetCurrent(), 1.0 / 60,
+                0, 0, TimerCallback, NULL);
+            CFRunLoopAddTimer(g_main_run_loop, fallback_timer,
+                              kCFRunLoopCommonModes);
+            fprintf(stderr,
+                    "[framebufferd] CVDisplayLink unavailable; using 60Hz fallback\n");
+        }
+
+        printf("[framebufferd] direct-present mode (zero-copy, host vsync)\n");
         CFRunLoopRun();
 
-        CFRelease(timer);
+        if (display_link) {
+            CVDisplayLinkStop(display_link);
+            CVDisplayLinkRelease(display_link);
+        }
+        if (fallback_timer) CFRelease(fallback_timer);
+        CFRunLoopRemoveSource(g_main_run_loop, g_present_source,
+                              kCFRunLoopCommonModes);
+        CFRelease(g_present_source);
+        g_present_source = NULL;
+        CFRelease(g_main_run_loop);
+        g_main_run_loop = NULL;
         g_running = false;
 
         pthread_mutex_lock(&g_surface_lock);
         if (g_client_surface) { CFRelease(g_client_surface); g_client_surface = NULL; }
+        if (g_present_reply_port != MACH_PORT_NULL) {
+            mach_port_deallocate(mach_task_self(), g_present_reply_port);
+            g_present_reply_port = MACH_PORT_NULL;
+        }
         pthread_mutex_unlock(&g_surface_lock);
     }
     return 0;
