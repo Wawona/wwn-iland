@@ -28,6 +28,12 @@ typedef struct IlandWlSwapchain IlandWlSwapchain;
  * the client drawing while the compositor holds one and one is queued. */
 #define ILAND_WL_SWAPCHAIN_DEPTH 3
 
+/* These ship in libiland_wayland_egl.a, not in libiland_userland.a. The EGL
+ * shim reaches them through the iland_wl_ops table rather than by name, so
+ * that a KMS-only client can link the core archive alone; see
+ * iland_wl_ops.h. */
+#define ILAND_WL_API
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -36,28 +42,29 @@ extern "C" {
  * dispatches (or steals) the client's own events. NULL when the compositor
  * does not offer dmabuf, which is the caller's cue to fail surface creation
  * rather than silently render nowhere. */
-IlandWlWinsys *iland_wl_winsys_create(struct wl_display *display);
-void iland_wl_winsys_destroy(IlandWlWinsys *ws);
+ILAND_WL_API IlandWlWinsys *iland_wl_winsys_create(struct wl_display *display);
+ILAND_WL_API void iland_wl_winsys_destroy(IlandWlWinsys *ws);
 
-IlandWlSwapchain *iland_wl_swapchain_create(IlandWlWinsys *ws,
-                                            struct wl_egl_window *win);
-void iland_wl_swapchain_destroy(IlandWlSwapchain *sc);
+ILAND_WL_API IlandWlSwapchain *iland_wl_swapchain_create(IlandWlWinsys *ws,
+                                                         struct wl_egl_window *win);
+ILAND_WL_API void iland_wl_swapchain_destroy(IlandWlSwapchain *sc);
 
-void iland_wl_swapchain_get_size(const IlandWlSwapchain *sc,
-                                 uint32_t *width, uint32_t *height);
+ILAND_WL_API void iland_wl_swapchain_get_size(const IlandWlSwapchain *sc,
+                                              uint32_t *width, uint32_t *height);
 
 /* Blocks until a slot the compositor has released is available.
  * Returns the slot index, or -1. */
-int iland_wl_swapchain_acquire(IlandWlSwapchain *sc);
+ILAND_WL_API int iland_wl_swapchain_acquire(IlandWlSwapchain *sc);
 
-IOSurfaceRef iland_wl_swapchain_iosurface(const IlandWlSwapchain *sc, int slot);
+ILAND_WL_API IOSurfaceRef iland_wl_swapchain_iosurface(const IlandWlSwapchain *sc,
+                                                       int slot);
 
 /* attach + damage + commit + flush, and mark the slot busy until release. */
-int iland_wl_swapchain_post(IlandWlSwapchain *sc, int slot);
+ILAND_WL_API int iland_wl_swapchain_post(IlandWlSwapchain *sc, int slot);
 
 /* Reallocates when the client called wl_egl_window_resize(). Returns 1 when the
  * IOSurfaces were replaced, so the caller must drop its cached pbuffers. */
-int iland_wl_swapchain_check_resize(IlandWlSwapchain *sc);
+ILAND_WL_API int iland_wl_swapchain_check_resize(IlandWlSwapchain *sc);
 
 #ifdef __cplusplus
 }

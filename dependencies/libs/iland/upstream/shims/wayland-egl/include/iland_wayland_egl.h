@@ -12,26 +12,31 @@
 struct wl_surface;
 struct wl_egl_window;
 
+/* See iland_wl_ops.h: these live in libiland_wayland_egl.a, and the EGL shim in
+ * the core archive reaches them through the ops table instead of by name. */
+#define ILAND_WL_EGL_API
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* Non-zero when `win` is one of ours (guards against a client passing a
  * foreign/garbage native window into eglCreateWindowSurface). */
-int iland_wl_egl_window_is_valid(const struct wl_egl_window *win);
+ILAND_WL_EGL_API int iland_wl_egl_window_is_valid(const struct wl_egl_window *win);
 
-struct wl_surface *iland_wl_egl_window_get_surface(const struct wl_egl_window *win);
-void iland_wl_egl_window_get_size(const struct wl_egl_window *win,
-                                  int *width, int *height);
+ILAND_WL_EGL_API struct wl_surface *
+iland_wl_egl_window_get_surface(const struct wl_egl_window *win);
+ILAND_WL_EGL_API void iland_wl_egl_window_get_size(const struct wl_egl_window *win,
+                                                   int *width, int *height);
 
 /* Consumes the pending wl_egl_window_resize(): returns non-zero once per
  * resize and reports the attach offset the next commit must apply. */
-int iland_wl_egl_window_take_resize(struct wl_egl_window *win,
-                                    int *dx, int *dy);
+ILAND_WL_EGL_API int iland_wl_egl_window_take_resize(struct wl_egl_window *win,
+                                                     int *dx, int *dy);
 
 /* Records the geometry actually committed, for wl_egl_window_get_attached_size. */
-void iland_wl_egl_window_set_attached(struct wl_egl_window *win,
-                                      int width, int height);
+ILAND_WL_EGL_API void iland_wl_egl_window_set_attached(struct wl_egl_window *win,
+                                                       int width, int height);
 
 #ifdef __cplusplus
 }

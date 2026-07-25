@@ -108,9 +108,6 @@ pkgs.stdenv.mkDerivation {
       shims/drm/drm/src/drm.c \
       shims/drm/drm/src/drm_linux.c \
       shims/drm/drm/src/drm_ioctl.c \
-      shims/wayland-egl/src/wayland_egl.c \
-      shims/egl/src/egl_wayland.c \
-      linux-dmabuf-v1-protocol.c \
       shims/egl/src/egl.c; do
       obj="$(basename "$src").o"
       echo "CC $src"
@@ -120,6 +117,24 @@ pkgs.stdenv.mkDerivation {
 
     "$AR" rcs libiland_userland.a $OBJS
 
+    # Wayland-EGL winsys, kept out of the core archive: it needs
+    # libwayland-client, and a KMS-only client (kmscube) must not have to link
+    # Wayland to use iland. egl.c refers to it weakly, so linking this archive
+    # is what turns EGL_PLATFORM_WAYLAND on. Clients that link it also need
+    # -lwayland-client.
+    WL_OBJS=""
+    for src in \
+      shims/wayland-egl/src/wayland_egl.c \
+      shims/egl/src/egl_wayland.c \
+      linux-dmabuf-v1-protocol.c; do
+      obj="wl_$(basename "$src").o"
+      echo "CC $src"
+      "$CLANG" -c "$src" $COMMON_FLAGS -o "$obj"
+      WL_OBJS="$WL_OBJS $obj"
+    done
+
+    "$AR" rcs libiland_wayland_egl.a $WL_OBJS
+
     runHook postBuild
   '';
 
@@ -127,6 +142,7 @@ pkgs.stdenv.mkDerivation {
     mkdir -p $out/lib $out/include/EGL $out/include/GLES2 $out/include/GLES3 $out/include/KHR
 
     cp libiland_userland.a $out/lib/
+    cp libiland_wayland_egl.a $out/lib/
 
     # Public client-facing headers
     cp shims/gbm/include/gbm.h                       $out/include/

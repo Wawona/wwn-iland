@@ -25,6 +25,7 @@
 #include "DisplaySurface.h"
 #include "drm_fourcc.h"
 #include "iland_wayland_egl.h"
+#include "iland_wl_ops.h"
 #include "iland_wl_winsys.h"
 
 /* Same convention as gbm_bo_get_modifier() in shims/gbm/src/gbm.m. */
@@ -380,4 +381,29 @@ int iland_wl_swapchain_check_resize(IlandWlSwapchain *sc)
     (void)slots_alloc(sc);
 
     return 1;
+}
+
+/*
+ * Hand the EGL shim its entry points. The shim lives in the other archive and
+ * cannot name these symbols without forcing every KMS-only client to link
+ * Wayland, so linking this archive at all is what switches
+ * EGL_PLATFORM_WAYLAND on. See iland_wl_ops.h.
+ */
+static const IlandWlOps iland_wl_ops_table = {
+    .winsys_create          = iland_wl_winsys_create,
+    .winsys_destroy         = iland_wl_winsys_destroy,
+    .swapchain_create       = iland_wl_swapchain_create,
+    .swapchain_destroy      = iland_wl_swapchain_destroy,
+    .swapchain_get_size     = iland_wl_swapchain_get_size,
+    .swapchain_acquire      = iland_wl_swapchain_acquire,
+    .swapchain_iosurface    = iland_wl_swapchain_iosurface,
+    .swapchain_post         = iland_wl_swapchain_post,
+    .swapchain_check_resize = iland_wl_swapchain_check_resize,
+    .egl_window_is_valid    = iland_wl_egl_window_is_valid,
+};
+
+__attribute__((constructor))
+static void iland_wl_ops_register(void)
+{
+    iland_wl_ops = &iland_wl_ops_table;
 }

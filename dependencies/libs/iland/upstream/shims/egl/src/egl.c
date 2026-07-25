@@ -42,6 +42,24 @@
 #define ILAND_HAVE_WL_WINSYS 1
 #include "iland_wayland_egl.h"
 #include "iland_wl_winsys.h"
+#include "iland_wl_ops.h"
+
+/* NULL unless libiland_wayland_egl.a is linked, which is what makes this a
+ * Wayland-capable build; see iland_wl_ops.h. Calling the winsys by name would
+ * put an undefined symbol in every KMS-only client, so the names below are
+ * redirected through the table and the entry points check iland_wl_ops first. */
+const IlandWlOps *iland_wl_ops = NULL;
+
+#define iland_wl_winsys_destroy(...)       iland_wl_ops->winsys_destroy(__VA_ARGS__)
+#define iland_wl_swapchain_create(...)     iland_wl_ops->swapchain_create(__VA_ARGS__)
+#define iland_wl_swapchain_destroy(...)    iland_wl_ops->swapchain_destroy(__VA_ARGS__)
+#define iland_wl_swapchain_get_size(...)   iland_wl_ops->swapchain_get_size(__VA_ARGS__)
+#define iland_wl_swapchain_acquire(...)    iland_wl_ops->swapchain_acquire(__VA_ARGS__)
+#define iland_wl_swapchain_iosurface(...)  iland_wl_ops->swapchain_iosurface(__VA_ARGS__)
+#define iland_wl_swapchain_post(...)       iland_wl_ops->swapchain_post(__VA_ARGS__)
+#define iland_wl_swapchain_check_resize(...) \
+    iland_wl_ops->swapchain_check_resize(__VA_ARGS__)
+#define iland_wl_egl_window_is_valid(...)  iland_wl_ops->egl_window_is_valid(__VA_ARGS__)
 #endif
 
 #ifdef ILAND_ANGLE_STATIC
@@ -388,6 +406,9 @@ static EGLDisplay shim_get_platform_display(EGLenum platform, void *native)
 #ifdef ILAND_HAVE_WL_WINSYS
     if (!native) return EGL_NO_DISPLAY;
 
+    /* libiland_wayland_egl.a is not linked: this build is KMS-only. */
+    if (!iland_wl_ops) return EGL_NO_DISPLAY;
+
     EGLShimDisplay *dpy = calloc(1, sizeof(*dpy));
     if (!dpy) return EGL_NO_DISPLAY;
 
@@ -429,7 +450,7 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
     if (sd->kind == EGL_SHIM_DISPLAY_WAYLAND && !sd->wl_winsys) {
         /* Bind linux-dmabuf now so a compositor without it fails here, where
          * clients check, instead of at first swap. */
-        sd->wl_winsys = iland_wl_winsys_create(sd->wl_display);
+        sd->wl_winsys = iland_wl_ops->winsys_create(sd->wl_display);
         if (!sd->wl_winsys)
             return EGL_FALSE;
     }
@@ -469,7 +490,7 @@ const char *eglQueryString(EGLDisplay dpy, EGLint name)
      */
     if (dpy == EGL_NO_DISPLAY) {
 #ifdef ILAND_HAVE_WL_WINSYS
-        if (name == EGL_EXTENSIONS)
+        if (name == EGL_EXTENSIONS && iland_wl_ops)
             return "EGL_EXT_client_extensions EGL_EXT_platform_base "
                    "EGL_KHR_platform_wayland EGL_EXT_platform_wayland";
 #endif

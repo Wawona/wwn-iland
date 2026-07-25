@@ -36,6 +36,17 @@ let
       [ "-force_load" "${strip iland}/lib/libiland_userland.a" ]
     else
       [ ];
+  # Wayland-EGL winsys: a separate archive so KMS-only clients need not link
+  # libwayland. egl.c refers to it weakly, and a weak undefined reference does
+  # not pull an archive member, so force_load is what actually enables
+  # EGL_PLATFORM_WAYLAND. Absent on targets without the winsys (Android, and
+  # any iland predating it), where the weak refs stay NULL.
+  ilandWaylandEglArchive =
+    let archive = "${strip iland}/lib/libiland_wayland_egl.a";
+    in if iland != null && builtins.pathExists archive then
+      [ "-force_load" archive ]
+    else
+      [ ];
   # Do not -force_load libkmscube.a beside static ANGLE: iOS 26 ld fails to resolve
   # libc++ for libGLESv2.a when kmscube is force-loaded in the same link unit as
   # WWNIlandPresenter.o. Archive pull via -lkmscube is enough (kmscube_main is referenced).
@@ -88,6 +99,7 @@ let
 in
 libPaths
 ++ ilandArchive
+++ ilandWaylandEglArchive
 ++ angleFlags
 ++ cxxFlags
 ++ platformSupportLibs
