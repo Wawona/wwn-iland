@@ -1,4 +1,6 @@
-# Link flags for iland + ANGLE + in-process kmscube on Apple targets.
+# Link flags for iland + ANGLE + the in-process cube clients (kmscube,
+# opengl-cube, vkcube) on Apple targets. vkcube resolves its Vulkan entry
+# points against MoltenVK, which moltenvkLdflags puts on the same link line.
 # Mirrors wwn-kmscube/dependencies/generators/kmscube-ldflags.nix.
 { lib, deps, forceLoad ? true, simulator ? false }:
 
@@ -10,6 +12,8 @@ let
   angle = deps.angle or null;
   kmscube =
     deps.kmscube or deps."iland-gl-clients" or deps.iland-gl-clients or null;
+  openglCube = deps."opengl-cube" or null;
+  vkcube = deps.vkcube or null;
   angleLinkKind =
     if angle == null then
       "none"
@@ -24,6 +28,8 @@ let
     (libPath "angle")
     (libPath "kmscube")
     (libPath "iland-gl-clients")
+    (libPath "opengl-cube")
+    (libPath "vkcube")
   ];
   ilandArchive =
     if forceLoad && iland != null then
@@ -33,15 +39,32 @@ let
   # Do not -force_load libkmscube.a beside static ANGLE: iOS 26 ld fails to resolve
   # libc++ for libGLESv2.a when kmscube is force-loaded in the same link unit as
   # WWNIlandPresenter.o. Archive pull via -lkmscube is enough (kmscube_main is referenced).
-  kmscubeArchive =
-    if forceLoad && kmscube != null then
+  # Same pattern for the sibling cubes: an undefined-symbol reference is enough
+  # to pull the archive member, and it keeps them off the -force_load list.
+  cubeArchive = { dep, entry, lib_ }:
+    if forceLoad && dep != null then
       [
-        "-L${strip kmscube}/lib"
-        "-Wl,-u,_kmscube_main"
-        "-lkmscube"
+        "-L${strip dep}/lib"
+        "-Wl,-u,_${entry}"
+        "-l${lib_}"
       ]
     else
       [ ];
+  kmscubeArchive = cubeArchive {
+    dep = kmscube;
+    entry = "kmscube_main";
+    lib_ = "kmscube";
+  };
+  openglCubeArchive = cubeArchive {
+    dep = openglCube;
+    entry = "opengl_cube_main";
+    lib_ = "opengl_cube";
+  };
+  vkcubeArchive = cubeArchive {
+    dep = vkcube;
+    entry = "vkcube_main";
+    lib_ = "vkcube";
+  };
   angleFlags =
     if angle == null then
       [ ]
@@ -63,4 +86,11 @@ let
     "-liconv"
   ];
 in
-libPaths ++ ilandArchive ++ angleFlags ++ cxxFlags ++ platformSupportLibs ++ kmscubeArchive
+libPaths
+++ ilandArchive
+++ angleFlags
+++ cxxFlags
+++ platformSupportLibs
+++ kmscubeArchive
+++ openglCubeArchive
+++ vkcubeArchive
