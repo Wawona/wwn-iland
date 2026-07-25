@@ -96,24 +96,11 @@ count = text.count(old_vimage)
 if count < 1:
     raise SystemExit(f"egl.c vImage anchor missing (found {count})")
 text = text.replace(old_vimage, new_vimage)
-old_egl = '    g_angle_handle = open_angle_library("/opt/local/lib/libEGL.dylib");'
-new_egl = """#if defined(__ANDROID__)
-    g_angle_handle = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
-#else
-    g_angle_handle = open_angle_library("/opt/local/lib/libEGL.dylib");
-#endif"""
-if old_egl not in text:
-    raise SystemExit("egl.c mac EGL dlopen anchor missing")
-text = text.replace(old_egl, new_egl, 1)
-old_gles = '    void *h = open_angle_library("/opt/local/lib/libGLESv2.dylib");'
-new_gles = """#if defined(__ANDROID__)
-    void *h = dlopen("libGLESv2.so", RTLD_NOW | RTLD_LOCAL);
-#else
-    void *h = open_angle_library("/opt/local/lib/libGLESv2.dylib");
-#endif"""
-if old_gles not in text:
-    raise SystemExit("egl.c mac GLES dlopen anchor missing")
-text = text.replace(old_gles, new_gles, 1)
+# The Android libEGL.so / libGLESv2.so dlopen arms live in egl.c behind
+# `#elif defined(__ANDROID__)`. They used to be patched in here, anchored on the
+# macOS dlopen lines, which broke silently the moment those lines changed.
+if 'defined(__ANDROID__)' not in text:
+    raise SystemExit("egl.c lost its __ANDROID__ dlopen arm")
 path.write_text(text)
 PY
   '';

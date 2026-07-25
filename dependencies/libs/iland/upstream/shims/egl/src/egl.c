@@ -228,8 +228,31 @@ static int load_angle(void)
         g_angle_handle = open_angle_library(candidates[i]);
         if (g_angle_handle) break;
     }
+#elif defined(__ANDROID__)
+    /* System ANGLE/GLES from the NDK loader; no bundled Apple-style slice. */
+    g_angle_handle = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
 #else
-    g_angle_handle = open_angle_library("/opt/local/lib/libEGL.dylib");
+    /*
+     * Prefer an ANGLE that the host process has already mapped. A macOS app
+     * bundle links its own copy in Contents/Frameworks, so loading a second
+     * image from an absolute path gives dyld two definitions of ANGLE's
+     * Objective-C classes (ANGLESwapCGLLayer), which crashes the client. The
+     * @rpath name matches the bundled install name, so dyld hands back the
+     * existing image instead of mapping another one. The absolute path stays
+     * last for unbundled use: CLI tools, and Mode B injection into processes
+     * that carry no Wawona rpath.
+     */
+    static const char *candidates[] = {
+        "@rpath/libEGL.dylib",
+        "@executable_path/../Frameworks/libEGL.dylib",
+        "@executable_path/Frameworks/libEGL.dylib",
+        "/opt/local/lib/libEGL.dylib",
+        NULL,
+    };
+    for (size_t i = 0; candidates[i]; i++) {
+        g_angle_handle = open_angle_library(candidates[i]);
+        if (g_angle_handle) break;
+    }
 #endif
     if (!g_angle_handle) return -1;
 
@@ -277,8 +300,22 @@ static void load_gles2(void)
         h = open_angle_library(candidates[i]);
         if (h) break;
     }
+#elif defined(__ANDROID__)
+    void *h = dlopen("libGLESv2.so", RTLD_NOW | RTLD_LOCAL);
 #else
-    void *h = open_angle_library("/opt/local/lib/libGLESv2.dylib");
+    /* Same single-image rule as load_angle(). */
+    static const char *candidates[] = {
+        "@rpath/libGLESv2.dylib",
+        "@executable_path/../Frameworks/libGLESv2.dylib",
+        "@executable_path/Frameworks/libGLESv2.dylib",
+        "/opt/local/lib/libGLESv2.dylib",
+        NULL,
+    };
+    void *h = NULL;
+    for (size_t i = 0; candidates[i]; i++) {
+        h = open_angle_library(candidates[i]);
+        if (h) break;
+    }
 #endif
     if (!h) return;
     g_glReadPixels = dlsym(h, "glReadPixels");

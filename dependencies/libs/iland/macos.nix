@@ -42,8 +42,10 @@ pkgs.stdenv.mkDerivation {
   dontConfigure = true;
 
   preBuild = ''
-    # De-MacPorts: the EGL shim dlopen()s ANGLE from /opt/local; point it at the
-    # Nix-provided ANGLE (nixpkgs#angle) instead.
+    # De-MacPorts: rewrite the shim's last-resort ANGLE path from /opt/local to
+    # the Nix ANGLE. This is only the unbundled fallback — inside Wawona.app the
+    # shim resolves @rpath/Frameworks first so the process keeps a single ANGLE
+    # image (two copies duplicate ANGLESwapCGLLayer and crash the client).
     substituteInPlace shims/egl/src/egl.c \
       --replace "/opt/local/lib/libEGL.dylib"    "${angle}/lib/libEGL.dylib" \
       --replace "/opt/local/lib/libGLESv2.dylib" "${angle}/lib/libGLESv2.dylib"
