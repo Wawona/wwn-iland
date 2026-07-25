@@ -133,7 +133,17 @@ pkgs.stdenv.mkDerivation {
       WL_OBJS="$WL_OBJS $obj"
     done
 
-    "$AR" rcs libiland_wayland_egl.a $WL_OBJS
+    # wayland-scanner's linux-dmabuf interfaces are the same symbols weston
+    # generates from the same XML, and the app force-loads both archives, so
+    # exporting ours is a duplicate-symbol link error. Partial-link the winsys
+    # into one object first — the reference and the definition must end up in
+    # the same object for privatising to leave anything resolvable — then hide
+    # the protocol globals. Same treatment foot's protocol symbols get.
+    echo "_zwp_linux_*" > unexported-protocol.txt
+    ld -r -arch arm64 -o iland_wayland_egl.o $WL_OBJS \
+      -unexported_symbols_list unexported-protocol.txt
+
+    "$AR" rcs libiland_wayland_egl.a iland_wayland_egl.o
 
     runHook postBuild
   '';
