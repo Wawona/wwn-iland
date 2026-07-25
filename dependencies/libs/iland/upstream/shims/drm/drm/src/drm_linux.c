@@ -301,11 +301,14 @@ static void *mode_b_flip_worker(void *unused)
         g_mode_b_flip_queued = false;
         pthread_mutex_unlock(&g_flip_lock);
 
-#if defined(__APPLE__)
+        /*
+         * Only the macOS Mode B host implements the Mach ACK; every other
+         * target links a stub that fails immediately, which degrades this to
+         * an unsynchronised completion rather than a build or runtime error.
+         */
         if (drm_receive_present_ack(1000) != 0)
             fprintf(stderr,
-                    "[drm] framebufferd present ACK timed out; completing flip\n");
-#endif
+                    "[drm] framebufferd present ACK unavailable; completing flip\n");
         iland_drm_complete_page_flip(crtc_id, fb_id);
     }
     return NULL;
