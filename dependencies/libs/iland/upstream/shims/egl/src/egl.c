@@ -333,6 +333,17 @@ static EGLShimSurface *unwrap_surface(EGLSurface surf)
     return (EGLShimSurface *)surf;
 }
 
+/*
+ * ANGLE can be absent by policy (OpenGLDriver=none / WWN_DISABLE_EGL) or because
+ * no slice loaded, in which case every real_egl* pointer is NULL. Entry points
+ * must then report failure rather than dispatch through those pointers: stock
+ * clients do not all check their way out. kmscube, for one, calls eglInitialize
+ * on the EGL_NO_DISPLAY that eglGetDisplay just handed back, which used to jump
+ * to address 0 and take the whole host app down over a preference.
+ */
+#define WWN_REQUIRE_ANGLE(fail_value) \
+    do { if (load_angle() < 0) return (fail_value); } while (0)
+
 EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id)
 {
     if (load_angle() < 0) return EGL_NO_DISPLAY;
@@ -348,6 +359,7 @@ EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id)
 
 EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
 {
+    WWN_REQUIRE_ANGLE(EGL_FALSE);
     load_gles2();
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglInitialize(dpy, major, minor);
@@ -356,6 +368,7 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
 
 EGLBoolean eglTerminate(EGLDisplay dpy)
 {
+    WWN_REQUIRE_ANGLE(EGL_FALSE);
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglTerminate(dpy);
     EGLBoolean ret = real_eglTerminate(sd->angle_display);
@@ -382,6 +395,7 @@ const char *eglQueryString(EGLDisplay dpy, EGLint name)
 EGLBoolean eglGetConfigs(EGLDisplay dpy, EGLConfig *configs,
                           EGLint config_size, EGLint *num_config)
 {
+    WWN_REQUIRE_ANGLE(EGL_FALSE);
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglGetConfigs(dpy, configs, config_size, num_config);
     return real_eglGetConfigs(sd->angle_display, configs, config_size, num_config);
@@ -391,6 +405,7 @@ EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list,
                             EGLConfig *configs, EGLint config_size,
                             EGLint *num_config)
 {
+    WWN_REQUIRE_ANGLE(EGL_FALSE);
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglChooseConfig(dpy, attrib_list, configs,
                                           config_size, num_config);
@@ -432,6 +447,7 @@ EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list,
 EGLBoolean eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config,
                                EGLint attribute, EGLint *value)
 {
+    WWN_REQUIRE_ANGLE(EGL_FALSE);
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglGetConfigAttrib(dpy, config, attribute, value);
 
@@ -468,6 +484,7 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config,
                              EGLContext share_context,
                              const EGLint *attrib_list)
 {
+    WWN_REQUIRE_ANGLE(EGL_NO_CONTEXT);
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglCreateContext(dpy, config, share_context, attrib_list);
     return real_eglCreateContext(sd->angle_display, config, share_context, attrib_list);
@@ -475,6 +492,7 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config,
 
 EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx)
 {
+    WWN_REQUIRE_ANGLE(EGL_FALSE);
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglDestroyContext(dpy, ctx);
     return real_eglDestroyContext(sd->angle_display, ctx);
@@ -516,6 +534,7 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
                                    EGLNativeWindowType win,
                                    const EGLint *attrib_list)
 {
+    WWN_REQUIRE_ANGLE(EGL_NO_SURFACE);
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglCreateWindowSurface(dpy, config, win, attrib_list);
 
@@ -561,6 +580,7 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
 
 EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
 {
+    WWN_REQUIRE_ANGLE(EGL_FALSE);
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglDestroySurface(dpy, surface);
 
@@ -584,6 +604,7 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
 EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw,
                            EGLSurface read, EGLContext ctx)
 {
+    WWN_REQUIRE_ANGLE(EGL_FALSE);
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglMakeCurrent(dpy, draw, read, ctx);
 
@@ -598,6 +619,7 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw,
 
 EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
 {
+    WWN_REQUIRE_ANGLE(EGL_FALSE);
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglSwapBuffers(dpy, surface);
 
@@ -692,6 +714,7 @@ EGLBoolean eglWaitGL(void)
 
 EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval)
 {
+    WWN_REQUIRE_ANGLE(EGL_FALSE);
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglSwapInterval(dpy, interval);
     return real_eglSwapInterval(sd->angle_display, interval);
