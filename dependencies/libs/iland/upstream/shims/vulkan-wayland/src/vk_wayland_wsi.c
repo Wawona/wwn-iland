@@ -8,113 +8,13 @@
 #include <string.h>
 
 #include <wayland-client.h>
-#include <vulkan/vulkan.h>
 
-#ifndef VK_ERROR_SURFACE_LOST_KHR
-#define VK_ERROR_SURFACE_LOST_KHR (-1000000000)
-#endif
-#ifndef VK_ERROR_OUT_OF_DATE_KHR
-#define VK_ERROR_OUT_OF_DATE_KHR (-1000001004)
-#endif
-#ifndef VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-#define VK_IMAGE_LAYOUT_PRESENT_SRC_KHR 1000001002
-#endif
+#define VK_USE_PLATFORM_WAYLAND_KHR
+#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_wayland.h>
 
 #include "iland_vk_wayland.h"
 #include "iland_wl_winsys.h"
-
-#ifndef VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME
-#define VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME "VK_KHR_wayland_surface"
-#endif
-#ifndef VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR
-#define VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR 1000006000
-#endif
-#ifndef VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR
-#define VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR 1000001000
-#endif
-#ifndef VK_STRUCTURE_TYPE_PRESENT_INFO_KHR
-#define VK_STRUCTURE_TYPE_PRESENT_INFO_KHR 1000001001
-#endif
-#ifndef VK_OBJECT_TYPE_SURFACE_KHR
-#define VK_OBJECT_TYPE_SURFACE_KHR 1000000000
-#endif
-
-typedef VkFlags VkWaylandSurfaceCreateFlagsKHR;
-typedef struct VkWaylandSurfaceCreateInfoKHR {
-    VkStructureType sType;
-    const void *pNext;
-    VkWaylandSurfaceCreateFlagsKHR flags;
-    struct wl_display *display;
-    struct wl_surface *surface;
-} VkWaylandSurfaceCreateInfoKHR;
-
-typedef VkFlags VkSwapchainCreateFlagsKHR;
-typedef enum VkPresentModeKHR {
-    VK_PRESENT_MODE_IMMEDIATE_KHR = 0,
-    VK_PRESENT_MODE_MAILBOX_KHR = 1,
-    VK_PRESENT_MODE_FIFO_KHR = 2,
-    VK_PRESENT_MODE_FIFO_RELAXED_KHR = 3,
-} VkPresentModeKHR;
-
-typedef struct VkSwapchainCreateInfoKHR {
-    VkStructureType sType;
-    const void *pNext;
-    VkSwapchainCreateFlagsKHR flags;
-    VkSurfaceKHR surface;
-    uint32_t minImageCount;
-    VkFormat imageFormat;
-    VkColorSpaceKHR imageColorSpace;
-    VkExtent2D imageExtent;
-    uint32_t imageArrayLayers;
-    VkImageUsageFlags imageUsage;
-    VkSharingMode imageSharingMode;
-    uint32_t queueFamilyIndexCount;
-    const uint32_t *pQueueFamilyIndices;
-    VkSurfaceTransformFlagBitsKHR preTransform;
-    VkCompositeAlphaFlagBitsKHR compositeAlpha;
-    VkPresentModeKHR presentMode;
-    VkBool32 clipped;
-    VkSwapchainKHR oldSwapchain;
-} VkSwapchainCreateInfoKHR;
-
-typedef struct VkPresentInfoKHR {
-    VkStructureType sType;
-    const void *pNext;
-    uint32_t waitSemaphoreCount;
-    const VkSemaphore *pWaitSemaphores;
-    uint32_t swapchainCount;
-    const VkSwapchainKHR *pSwapchains;
-    const uint32_t *pImageIndices;
-    VkResult *pResults;
-} VkPresentInfoKHR;
-
-typedef struct VkSurfaceCapabilitiesKHR {
-    uint32_t minImageCount;
-    uint32_t maxImageCount;
-    VkExtent2D currentExtent;
-    VkExtent2D minImageExtent;
-    VkExtent2D maxImageExtent;
-    uint32_t maxImageArrayLayers;
-    VkSurfaceTransformFlagsKHR supportedTransforms;
-    VkSurfaceTransformFlagBitsKHR currentTransform;
-    VkCompositeAlphaFlagsKHR supportedCompositeAlpha;
-    VkImageUsageFlags supportedUsageFlags;
-} VkSurfaceCapabilitiesKHR;
-
-typedef struct VkSurfaceFormatKHR {
-    VkFormat format;
-    VkColorSpaceKHR colorSpace;
-} VkSurfaceFormatKHR;
-
-#ifndef VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-#define VK_COLOR_SPACE_SRGB_NONLINEAR_KHR 0
-#endif
-#ifndef VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
-#define VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR 0x00000001
-#endif
-#ifndef VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
-#define VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR 0x00000001
-#endif
 
 #define ILAND_VK_WL_MAGIC 0x49564b57u /* 'IVKW' */
 #define ILAND_VK_WL_MAX_IMAGES 3
