@@ -22,6 +22,8 @@ void iland_drm_set_present_callback(iland_present_callback_t cb, void *user);
 void iland_drm_complete_page_flip(uint32_t crtc_id, uint32_t fb_id);
 void iland_drm_set_cursor_callback(iland_cursor_callback_t cb, void *user);
 int iland_drm_present_is_in_window(void);
-void iland_drm_set_preferred_mode(uint32_t w, uint32_t h, uint32_t refresh);
+/* refresh_millihz: millihertz (60 Hz = 60000), 0 = auto. Not Hz. */
+void iland_drm_set_preferred_mode(uint32_t w, uint32_t h,
+                                  uint32_t refresh_millihz);
 
 #endif

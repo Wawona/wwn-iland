@@ -901,6 +901,49 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     return (EGLSurface)ss;
 }
 
+/*
+ * eglQueryString(EGL_NO_DISPLAY) above advertises EGL_EXT_platform_base, so a
+ * client that follows the extension — weston's
+ * weston_platform_create_egl_surface does — creates its window surface through
+ * this entry point rather than eglCreateWindowSurface. Leaving it unimplemented
+ * meant ANGLE answered for it and was handed a wl_egl_window (or a gbm_surface)
+ * it knows nothing about. Native-window handling is identical either way, so
+ * both spellings forward to the shim's own eglCreateWindowSurface.
+ */
+EGLSurface eglCreatePlatformWindowSurfaceEXT(EGLDisplay dpy, EGLConfig config,
+                                            void *native_window,
+                                            const EGLint *attrib_list)
+{
+    return eglCreateWindowSurface(dpy, config,
+                                  (EGLNativeWindowType)native_window,
+                                  attrib_list);
+}
+
+EGLSurface eglCreatePlatformWindowSurface(EGLDisplay dpy, EGLConfig config,
+                                          void *native_window,
+                                          const EGLAttrib *attrib_list)
+{
+    /* EGL 1.5 widens the attribute values to EGLAttrib. Narrow them back for
+     * the EXT-shaped path; every attribute either side of this shim is a small
+     * enum or pixel count, and a list long enough to overflow this is a client
+     * bug rather than something to silently truncate. */
+    EGLint narrowed[33];
+    const EGLint *attrs = NULL;
+    if (attrib_list) {
+        size_t n = 0;
+        while (attrib_list[n] != EGL_NONE &&
+               n + 2 < sizeof(narrowed) / sizeof(narrowed[0])) {
+            narrowed[n] = (EGLint)attrib_list[n];
+            narrowed[n + 1] = (EGLint)attrib_list[n + 1];
+            n += 2;
+        }
+        narrowed[n] = EGL_NONE;
+        attrs = narrowed;
+    }
+    return eglCreateWindowSurface(dpy, config,
+                                  (EGLNativeWindowType)native_window, attrs);
+}
+
 EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
 {
     WWN_REQUIRE_ANGLE(EGL_FALSE);
@@ -1095,6 +1138,10 @@ static const struct {
     { "eglChooseConfig",          (void *)eglChooseConfig },
     { "eglGetConfigAttrib",       (void *)eglGetConfigAttrib },
     { "eglCreateWindowSurface",   (void *)eglCreateWindowSurface },
+    { "eglCreatePlatformWindowSurface",
+      (void *)eglCreatePlatformWindowSurface },
+    { "eglCreatePlatformWindowSurfaceEXT",
+      (void *)eglCreatePlatformWindowSurfaceEXT },
     { "eglDestroySurface",        (void *)eglDestroySurface },
     { "eglMakeCurrent",           (void *)eglMakeCurrent },
     { "eglSwapBuffers",           (void *)eglSwapBuffers },

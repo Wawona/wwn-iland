@@ -27,6 +27,9 @@ SYMS=(
   eglDestroyContext eglCreateWindowSurface eglDestroySurface eglMakeCurrent
   eglSwapBuffers eglBindAPI eglWaitGL eglSwapInterval eglCreatePbufferSurface
   eglCreatePbufferFromClientBuffer eglGetCurrentContext eglGetProcAddress
+  # The shim defines these too (EGL_EXT_platform_base, which it advertises), so
+  # they must move aside even though the shim never calls ANGLE's versions.
+  eglCreatePlatformWindowSurface eglCreatePlatformWindowSurfaceEXT
 )
 
 args=()

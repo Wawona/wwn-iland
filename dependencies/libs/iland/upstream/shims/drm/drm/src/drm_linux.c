@@ -61,13 +61,21 @@ static int g_mode_count;
  * bounds (in physical pixels, i.e. points x scale) BEFORE Weston enumerates
  * modes, so the nested output matches the host surface 1:1.
  */
-static uint32_t g_pref_w = 0, g_pref_h = 0, g_pref_refresh = 0;
+static uint32_t g_pref_w = 0, g_pref_h = 0, g_pref_refresh_millihz = 0;
 
-void iland_drm_set_preferred_mode(uint32_t w, uint32_t h, uint32_t refresh)
+/*
+ * refresh_millihz is millihertz, as Wayland reports refresh and as the macOS
+ * host has always declared it — 60 Hz is 60000. It used to be assigned straight
+ * to drmModeModeInfo.vrefresh, which is Hz, so the three hosts disagreed: macOS
+ * passed 60000 and published a 60000 Hz mode with a nonsense pixel clock,
+ * Android passed 60 (0.06 Hz read as millihertz), and iOS passed 0. A client
+ * that paces off the mode — Weston's DRM backend does — was being lied to.
+ */
+void iland_drm_set_preferred_mode(uint32_t w, uint32_t h, uint32_t refresh_millihz)
 {
     g_pref_w = w;
     g_pref_h = h;
-    g_pref_refresh = refresh;
+    g_pref_refresh_millihz = refresh_millihz;
     /* Force re-enumeration if modes were already built with stale defaults. */
     g_mode_count = 0;
 }
@@ -107,11 +115,17 @@ static void init_modes(void)
      * created at the exact host surface size — no Metal stretch.
      */
     if (g_pref_w > 0 && g_pref_h > 0) {
-        uint32_t refresh_rate = g_pref_refresh > 0 ? g_pref_refresh
-                                                   : get_display_refresh_rate();
+        /* Keep millihertz for the pixel clock and round only vrefresh, so a
+         * 59.94 or 119.88 Hz host does not silently become 60 or 120 in the
+         * timing. 64-bit: w*h*millihz overflows 32 bits at ~1080p60. */
+        uint64_t millihz = g_pref_refresh_millihz > 0
+                               ? (uint64_t)g_pref_refresh_millihz
+                               : (uint64_t)get_display_refresh_rate() * 1000;
+        uint32_t refresh_rate = (uint32_t)((millihz + 500) / 1000);
         drmModeModeInfo *pm = &g_modes[g_mode_count++];
         memset(pm, 0, sizeof(*pm));
-        pm->clock       = (g_pref_w * g_pref_h * refresh_rate + 500) / 1000;
+        pm->clock       = (uint32_t)(((uint64_t)g_pref_w * g_pref_h * millihz
+                                      + 500000) / 1000000);
         pm->hdisplay    = g_pref_w; pm->hsync_start = g_pref_w + 88;
         pm->hsync_end   = g_pref_w + 88 + 44; pm->htotal = g_pref_w + 88 + 44 + 168;
         pm->vdisplay    = g_pref_h; pm->vsync_start = g_pref_h + 4;
@@ -942,11 +956,17 @@ int drmHandleEvent(int fd, drmEventContextPtr evctx)
 
 /* ── generic ioctl ────────────────────────────────────────────────────── */
 
+/*
+ * Mode B reaches the dispatch table below through its Dobby ioctl() hook. Mode A
+ * has no hook, and this returned ENOSYS, so a client that goes through libdrm's
+ * generic entry point instead of the typed drmMode* wrappers — which is most of
+ * them for anything the wrappers don't cover — failed on a request the shim can
+ * in fact answer. Both modes now share one implementation.
+ */
 int drmIoctl(int fd, unsigned long request, void *arg)
 {
-    (void)fd; (void)request; (void)arg;
-    errno = ENOSYS;
-    return -1;
+    if (check_fd(fd) < 0) return -1;
+    return drm_ioctl_dispatch(request, arg);
 }
 
 /* ── auth / master ────────────────────────────────────────────────────── */

@@ -76,9 +76,14 @@ int iland_drm_present_is_in_window(void);
  * shim enumerates DRM modes. On iOS the macOS WindowServer plist is absent, so
  * without this the shim falls back to 1920x1080 and the nested compositor is
  * stretched by Metal. Call this with the real host view bounds BEFORE Weston
- * enumerates modes (e.g. during iland present setup). refresh == 0 means "auto".
+ * enumerates modes (e.g. during iland present setup).
+ *
+ * refresh_millihz is millihertz (60 Hz = 60000), matching how Wayland reports
+ * refresh; 0 means "auto" (host display rate, or 60 where that cannot be
+ * queried). Do not pass Hz — 60 here is 0.06 Hz.
  */
-void iland_drm_set_preferred_mode(uint32_t w, uint32_t h, uint32_t refresh);
+void iland_drm_set_preferred_mode(uint32_t w, uint32_t h,
+                                  uint32_t refresh_millihz);
 
 /*
  * Ensure DRM_VIRTUAL_FD (42) is a real pipe readable by select/poll, and set
