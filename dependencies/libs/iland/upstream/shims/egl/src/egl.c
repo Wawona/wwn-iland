@@ -32,6 +32,7 @@
 
 #include <egl_shim.h>
 #include <gbm_priv.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -131,6 +132,38 @@ ANGLE_FN(eglReleaseTexImage);
 
 static void (*g_glReadPixels)(int, int, int, int, unsigned int, unsigned int, void *) = NULL;
 static void (*g_glFinish)(void) = NULL;
+/* Prefer a fence over glFinish: Finish stalls the CPU until every prior
+ * command retires, which is what made swaps feel like half-rate when the
+ * present path was already GPU-bound. */
+#ifndef EGL_SYNC_FENCE
+#define EGL_SYNC_FENCE 0x30F9
+#endif
+#ifndef EGL_SYNC_FLUSH_COMMANDS_BIT
+#define EGL_SYNC_FLUSH_COMMANDS_BIT 0x0001
+#endif
+#ifndef EGL_FOREVER
+#define EGL_FOREVER 0xFFFFFFFFFFFFFFFFull
+#endif
+typedef void *WwnEglSync;
+static WwnEglSync (*g_eglCreateSync)(EGLDisplay, EGLenum, const intptr_t *) = NULL;
+static EGLint (*g_eglClientWaitSync)(EGLDisplay, WwnEglSync, EGLint, uint64_t) = NULL;
+static EGLBoolean (*g_eglDestroySync)(EGLDisplay, WwnEglSync) = NULL;
+
+/* Flush GPU work for the posted buffer without a full-pipeline glFinish. */
+static void zc_flush_gpu(EGLDisplay angle_dpy)
+{
+    if (g_eglCreateSync && g_eglClientWaitSync && g_eglDestroySync && angle_dpy) {
+        WwnEglSync sync = g_eglCreateSync(angle_dpy, EGL_SYNC_FENCE, NULL);
+        if (sync) {
+            g_eglClientWaitSync(angle_dpy, sync, EGL_SYNC_FLUSH_COMMANDS_BIT,
+                                EGL_FOREVER);
+            g_eglDestroySync(angle_dpy, sync);
+            return;
+        }
+    }
+    if (g_glFinish) g_glFinish();
+    else if (real_eglWaitGL) real_eglWaitGL();
+}
 /* GLES3; NULL on a GLES2-only driver, which then keeps the old direct-render
  * path (and its missing depth buffer) — see zc_render_pbuffer. */
 static void (*g_glBindFramebuffer)(unsigned int, unsigned int) = NULL;
@@ -265,10 +298,22 @@ static void load_gles2(void)
     g_glCheckFramebufferStatus = glCheckFramebufferStatus;
     g_glDeleteTextures = glDeleteTextures;
     g_glDeleteFramebuffers = glDeleteFramebuffers;
-    if (real_eglGetProcAddress)
+    if (real_eglGetProcAddress) {
         g_glBlitFramebuffer = (void (*)(int, int, int, int, int, int, int, int,
                                         unsigned int, unsigned int))
             real_eglGetProcAddress("glBlitFramebuffer");
+        g_eglCreateSync = (void *)real_eglGetProcAddress("eglCreateSync");
+        if (!g_eglCreateSync)
+            g_eglCreateSync = (void *)real_eglGetProcAddress("eglCreateSyncKHR");
+        g_eglClientWaitSync = (void *)real_eglGetProcAddress("eglClientWaitSync");
+        if (!g_eglClientWaitSync)
+            g_eglClientWaitSync =
+                (void *)real_eglGetProcAddress("eglClientWaitSyncKHR");
+        g_eglDestroySync = (void *)real_eglGetProcAddress("eglDestroySync");
+        if (!g_eglDestroySync)
+            g_eglDestroySync =
+                (void *)real_eglGetProcAddress("eglDestroySyncKHR");
+    }
 }
 #else
 static void *open_angle_library(const char *path)
@@ -397,6 +442,19 @@ static void load_gles2(void)
     g_glCheckFramebufferStatus = dlsym(h, "glCheckFramebufferStatus");
     g_glDeleteTextures     = dlsym(h, "glDeleteTextures");
     g_glDeleteFramebuffers = dlsym(h, "glDeleteFramebuffers");
+    if (real_eglGetProcAddress) {
+        g_eglCreateSync = (void *)real_eglGetProcAddress("eglCreateSync");
+        if (!g_eglCreateSync)
+            g_eglCreateSync = (void *)real_eglGetProcAddress("eglCreateSyncKHR");
+        g_eglClientWaitSync = (void *)real_eglGetProcAddress("eglClientWaitSync");
+        if (!g_eglClientWaitSync)
+            g_eglClientWaitSync =
+                (void *)real_eglGetProcAddress("eglClientWaitSyncKHR");
+        g_eglDestroySync = (void *)real_eglGetProcAddress("eglDestroySync");
+        if (!g_eglDestroySync)
+            g_eglDestroySync =
+                (void *)real_eglGetProcAddress("eglDestroySyncKHR");
+    }
 }
 #endif
 
@@ -1150,8 +1208,7 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
             zc_blit_to_slot(sd, ss,
                             ss->iosurf_pbuffers[ss->wl_slot]);
 
-        if (g_glFinish) g_glFinish();
-        else if (real_eglWaitGL) real_eglWaitGL();
+        zc_flush_gpu(sd->angle_display);
 
         zc_probe_iosurface(iland_wl_swapchain_iosurface(ss->wl_swapchain,
                                                         ss->wl_slot),
@@ -1181,8 +1238,7 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
         if (ss->render_pbuffer)
             zc_blit_to_slot(sd, ss, ss->iosurf_pbuffers[gs->write_idx]);
 
-        if (g_glFinish) g_glFinish();
-        else if (real_eglWaitGL) real_eglWaitGL();
+        zc_flush_gpu(sd->angle_display);
 
         gbm_surface_advance_write(gs);
 

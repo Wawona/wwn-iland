@@ -243,12 +243,26 @@ int iland_drm_prepare_virtual_fd(void)
  */
 static pthread_mutex_t g_flip_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_mode_b_flip_cond = PTHREAD_COND_INITIALIZER;
-static void *g_pending_flip_data = NULL;
-static uint32_t g_pending_flip_crtc;
-static uint32_t g_pending_flip_fb;
-static bool g_pending_flip_armed;
-static bool g_pending_flip_signaled;
+/*
+ * In-flight page-flip queue. Depth 2 is enough for double-buffer clients
+ * (kmscube) to keep one frame presenting while the next is submitted; a
+ * single-slot queue was what made scanout-locked completion starve cadence.
+ */
+#define ILAND_FLIP_QUEUE_DEPTH 2
+
+typedef struct {
+    void *user_data;
+    uint32_t crtc_id;
+    uint32_t fb_id;
+    bool armed;
+    bool signaled;
+} iland_pending_flip_t;
+
+static iland_pending_flip_t g_flip_queue[ILAND_FLIP_QUEUE_DEPTH];
+static int g_flip_queue_count;
 static bool g_mode_b_flip_queued;
+static uint32_t g_mode_b_flip_crtc;
+static uint32_t g_mode_b_flip_fb;
 static pthread_t g_mode_b_flip_thread;
 static pthread_once_t g_mode_b_flip_once = PTHREAD_ONCE_INIT;
 
@@ -257,16 +271,17 @@ static uint32_t get_display_refresh_rate(void);
 static int arm_page_flip(uint32_t crtc_id, uint32_t fb_id, void *user_data)
 {
     pthread_mutex_lock(&g_flip_lock);
-    if (g_pending_flip_armed) {
+    if (g_flip_queue_count >= ILAND_FLIP_QUEUE_DEPTH) {
         pthread_mutex_unlock(&g_flip_lock);
         errno = EBUSY;
         return -1;
     }
-    g_pending_flip_data = user_data;
-    g_pending_flip_crtc = crtc_id;
-    g_pending_flip_fb = fb_id;
-    g_pending_flip_armed = true;
-    g_pending_flip_signaled = false;
+    iland_pending_flip_t *slot = &g_flip_queue[g_flip_queue_count++];
+    slot->user_data = user_data;
+    slot->crtc_id = crtc_id;
+    slot->fb_id = fb_id;
+    slot->armed = true;
+    slot->signaled = false;
     pthread_mutex_unlock(&g_flip_lock);
     return 0;
 }
@@ -274,12 +289,15 @@ static int arm_page_flip(uint32_t crtc_id, uint32_t fb_id, void *user_data)
 static void cancel_page_flip(uint32_t crtc_id, uint32_t fb_id)
 {
     pthread_mutex_lock(&g_flip_lock);
-    if (g_pending_flip_armed &&
-        g_pending_flip_crtc == crtc_id &&
-        g_pending_flip_fb == fb_id) {
-        g_pending_flip_data = NULL;
-        g_pending_flip_armed = false;
-        g_pending_flip_signaled = false;
+    for (int i = 0; i < g_flip_queue_count; i++) {
+        iland_pending_flip_t *slot = &g_flip_queue[i];
+        if (slot->armed && slot->crtc_id == crtc_id && slot->fb_id == fb_id) {
+            memmove(&g_flip_queue[i], &g_flip_queue[i + 1],
+                    (size_t)(g_flip_queue_count - i - 1) * sizeof(*slot));
+            g_flip_queue_count--;
+            memset(&g_flip_queue[g_flip_queue_count], 0, sizeof(*slot));
+            break;
+        }
     }
     pthread_mutex_unlock(&g_flip_lock);
 }
@@ -287,13 +305,16 @@ static void cancel_page_flip(uint32_t crtc_id, uint32_t fb_id)
 void iland_drm_complete_page_flip(uint32_t crtc_id, uint32_t fb_id)
 {
     pthread_mutex_lock(&g_flip_lock);
-    if (!g_pending_flip_armed || g_pending_flip_signaled ||
-        g_pending_flip_crtc != crtc_id || g_pending_flip_fb != fb_id) {
-        pthread_mutex_unlock(&g_flip_lock);
-        return;
+    int event_fd = -1;
+    for (int i = 0; i < g_flip_queue_count; i++) {
+        iland_pending_flip_t *slot = &g_flip_queue[i];
+        if (slot->armed && !slot->signaled &&
+            slot->crtc_id == crtc_id && slot->fb_id == fb_id) {
+            slot->signaled = true;
+            event_fd = g_drm_event_pipe_write;
+            break;
+        }
     }
-    g_pending_flip_signaled = true;
-    int event_fd = g_drm_event_pipe_write;
     pthread_mutex_unlock(&g_flip_lock);
 
     if (event_fd >= 0) {
@@ -310,8 +331,8 @@ static void *mode_b_flip_worker(void *unused)
         pthread_mutex_lock(&g_flip_lock);
         while (!g_mode_b_flip_queued)
             pthread_cond_wait(&g_mode_b_flip_cond, &g_flip_lock);
-        uint32_t crtc_id = g_pending_flip_crtc;
-        uint32_t fb_id = g_pending_flip_fb;
+        uint32_t crtc_id = g_mode_b_flip_crtc;
+        uint32_t fb_id = g_mode_b_flip_fb;
         g_mode_b_flip_queued = false;
         pthread_mutex_unlock(&g_flip_lock);
 
@@ -339,6 +360,14 @@ static void schedule_mode_b_page_flip(void)
 {
     pthread_once(&g_mode_b_flip_once, start_mode_b_flip_worker);
     pthread_mutex_lock(&g_flip_lock);
+    /* Newest armed, unsignaled flip — Mode B presents one at a time. */
+    for (int i = g_flip_queue_count - 1; i >= 0; i--) {
+        if (g_flip_queue[i].armed && !g_flip_queue[i].signaled) {
+            g_mode_b_flip_crtc = g_flip_queue[i].crtc_id;
+            g_mode_b_flip_fb = g_flip_queue[i].fb_id;
+            break;
+        }
+    }
     g_mode_b_flip_queued = true;
     pthread_cond_signal(&g_mode_b_flip_cond);
     pthread_mutex_unlock(&g_flip_lock);
@@ -931,18 +960,30 @@ int drmHandleEvent(int fd, drmEventContextPtr evctx)
     if (byte == 1 && evctx) {
         struct timeval tv;
         gettimeofday(&tv, NULL);
+        void *data = NULL;
+        uint32_t crtc_id = 1;
         pthread_mutex_lock(&g_flip_lock);
-        void *data = g_pending_flip_data;
-        g_pending_flip_data = NULL;
-        g_pending_flip_armed = false;
-        g_pending_flip_signaled = false;
+        /* Deliver the oldest signaled flip so completion order matches the
+         * host, even when a later flip finished first. */
+        for (int i = 0; i < g_flip_queue_count; i++) {
+            iland_pending_flip_t *slot = &g_flip_queue[i];
+            if (slot->armed && slot->signaled) {
+                data = slot->user_data;
+                crtc_id = slot->crtc_id;
+                memmove(&g_flip_queue[i], &g_flip_queue[i + 1],
+                        (size_t)(g_flip_queue_count - i - 1) * sizeof(*slot));
+                g_flip_queue_count--;
+                memset(&g_flip_queue[g_flip_queue_count], 0, sizeof(*slot));
+                break;
+            }
+        }
         pthread_mutex_unlock(&g_flip_lock);
         /* page_flip_handler2 (v2+) provides CRTC ID required for atomic mode */
         if (evctx->version >= 2 && evctx->page_flip_handler2) {
             evctx->page_flip_handler2(fd, 0,
                                       (unsigned int)tv.tv_sec,
                                       (unsigned int)tv.tv_usec,
-                                      1 /* crtc_id */,
+                                      crtc_id,
                                       data);
         } else if (evctx->page_flip_handler) {
             evctx->page_flip_handler(fd, 0,

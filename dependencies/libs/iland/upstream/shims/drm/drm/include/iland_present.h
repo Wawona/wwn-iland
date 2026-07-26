@@ -58,10 +58,15 @@ typedef void (*iland_cursor_callback_t)(int32_t op,
 void iland_drm_set_present_callback(iland_present_callback_t cb, void *user);
 
 /*
- * Complete the one outstanding KMS page flip after the host presentation
- * engine has latched it. Mode A presenters call this from Metal command-buffer
+ * Complete one outstanding KMS page flip after the host presentation engine
+ * has latched it. Mode A presenters call this from Metal command-buffer
  * completion or after the Android swapchain present. Mode B completes from its
  * display cadence worker. Duplicate/late notifications are ignored.
+ *
+ * The shim keeps a small in-flight queue (depth > 1) so the client can submit
+ * the next flip while the previous one is still presenting — without that,
+ * scanout-locked completion starves the pipeline. Matching is by
+ * (crtc_id, fb_id); completion order follows host completion order.
  */
 void iland_drm_complete_page_flip(uint32_t crtc_id, uint32_t fb_id);
 
