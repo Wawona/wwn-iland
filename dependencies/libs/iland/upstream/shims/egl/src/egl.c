@@ -1077,9 +1077,43 @@ EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval)
     return real_eglSwapInterval(sd->angle_display, interval);
 }
 
+/* Entry points this shim replaces. ANGLE's eglGetProcAddress answers for these
+ * too, with its own versions, which know nothing about gbm surfaces or
+ * EGL_PLATFORM_WAYLAND — a client that resolves them dynamically would escape
+ * the shim and get NULL displays. weston-simple-egl does exactly that, via
+ * shared/platform.h's eglGetProcAddress("eglGetPlatformDisplayEXT"). */
+static const struct {
+    const char *name;
+    void *fn;
+} kShimEntryPoints[] = {
+    { "eglGetDisplay",            (void *)eglGetDisplay },
+    { "eglGetPlatformDisplay",    (void *)eglGetPlatformDisplay },
+    { "eglGetPlatformDisplayEXT", (void *)eglGetPlatformDisplayEXT },
+    { "eglInitialize",            (void *)eglInitialize },
+    { "eglTerminate",             (void *)eglTerminate },
+    { "eglQueryString",           (void *)eglQueryString },
+    { "eglChooseConfig",          (void *)eglChooseConfig },
+    { "eglGetConfigAttrib",       (void *)eglGetConfigAttrib },
+    { "eglCreateWindowSurface",   (void *)eglCreateWindowSurface },
+    { "eglDestroySurface",        (void *)eglDestroySurface },
+    { "eglMakeCurrent",           (void *)eglMakeCurrent },
+    { "eglSwapBuffers",           (void *)eglSwapBuffers },
+    { "eglSwapInterval",          (void *)eglSwapInterval },
+    { "eglGetError",              (void *)eglGetError },
+    { "eglGetProcAddress",        (void *)eglGetProcAddress },
+};
+
 __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *procname)
 {
     if (!procname || load_angle() < 0 || !real_eglGetProcAddress)
         return NULL;
+
+    for (size_t i = 0; i < sizeof(kShimEntryPoints) / sizeof(kShimEntryPoints[0]);
+         i++) {
+        if (strcmp(procname, kShimEntryPoints[i].name) == 0)
+            return (__eglMustCastToProperFunctionPointerType)
+                kShimEntryPoints[i].fn;
+    }
+
     return real_eglGetProcAddress(procname);
 }
