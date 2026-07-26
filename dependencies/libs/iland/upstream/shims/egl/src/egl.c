@@ -25,6 +25,8 @@
 #define eglCreatePbufferSurface        angle_eglCreatePbufferSurface
 #define eglCreatePbufferFromClientBuffer angle_eglCreatePbufferFromClientBuffer
 #define eglGetCurrentContext           angle_eglGetCurrentContext
+#define eglBindTexImage                angle_eglBindTexImage
+#define eglReleaseTexImage             angle_eglReleaseTexImage
 #define eglGetProcAddress              angle_eglGetProcAddress
 #endif
 
@@ -85,6 +87,8 @@ const IlandWlOps *iland_wl_ops = NULL;
 #undef eglCreatePbufferFromClientBuffer
 #undef eglGetCurrentContext
 #undef eglGetProcAddress
+#undef eglBindTexImage
+#undef eglReleaseTexImage
 #endif
 
 static void *g_angle_handle = NULL;
@@ -122,6 +126,8 @@ ANGLE_FN(eglCreatePbufferSurface);
 ANGLE_FN(eglCreatePbufferFromClientBuffer);
 ANGLE_FN(eglGetCurrentContext);
 ANGLE_FN(eglGetProcAddress);
+ANGLE_FN(eglBindTexImage);
+ANGLE_FN(eglReleaseTexImage);
 
 static void (*g_glReadPixels)(int, int, int, int, unsigned int, unsigned int, void *) = NULL;
 static void (*g_glFinish)(void) = NULL;
@@ -131,6 +137,16 @@ static void (*g_glBindFramebuffer)(unsigned int, unsigned int) = NULL;
 static void (*g_glGetIntegerv)(unsigned int, int *) = NULL;
 static void (*g_glBlitFramebuffer)(int, int, int, int, int, int, int, int,
                                    unsigned int, unsigned int) = NULL;
+static unsigned int (*g_glGetError)(void) = NULL;
+/* Reaching the IOSurface as an FBO colour attachment — see zc_blit_to_slot. */
+static void (*g_glGenTextures)(int, unsigned int *) = NULL;
+static void (*g_glBindTexture)(unsigned int, unsigned int) = NULL;
+static void (*g_glGenFramebuffers)(int, unsigned int *) = NULL;
+static void (*g_glFramebufferTexture2D)(unsigned int, unsigned int,
+                                        unsigned int, unsigned int, int) = NULL;
+static unsigned int (*g_glCheckFramebufferStatus)(unsigned int) = NULL;
+static void (*g_glDeleteTextures)(int, const unsigned int *) = NULL;
+static void (*g_glDeleteFramebuffers)(int, const unsigned int *) = NULL;
 
 /* EGL_ANGLE_iosurface_client_buffer constants (ANGLE-specific; not in stock
  * EGL/egl.h). Values are stable across ANGLE releases. */
@@ -228,6 +244,8 @@ static int load_angle(void)
     LOAD(eglCreatePbufferFromClientBuffer);
     LOAD(eglGetCurrentContext);
     LOAD(eglGetProcAddress);
+    LOAD(eglBindTexImage);
+    LOAD(eglReleaseTexImage);
 
     return 0;
 }
@@ -239,6 +257,14 @@ static void load_gles2(void)
     g_glFinish = glFinish;
     g_glBindFramebuffer = glBindFramebuffer;
     g_glGetIntegerv = glGetIntegerv;
+    g_glGetError = glGetError;
+    g_glGenTextures = glGenTextures;
+    g_glBindTexture = glBindTexture;
+    g_glGenFramebuffers = glGenFramebuffers;
+    g_glFramebufferTexture2D = glFramebufferTexture2D;
+    g_glCheckFramebufferStatus = glCheckFramebufferStatus;
+    g_glDeleteTextures = glDeleteTextures;
+    g_glDeleteFramebuffers = glDeleteFramebuffers;
     if (real_eglGetProcAddress)
         g_glBlitFramebuffer = (void (*)(int, int, int, int, int, int, int, int,
                                         unsigned int, unsigned int))
@@ -320,6 +346,8 @@ static int load_angle(void)
     LOAD(eglCreatePbufferFromClientBuffer);
     LOAD(eglGetCurrentContext);
     LOAD(eglGetProcAddress);
+    LOAD(eglBindTexImage);
+    LOAD(eglReleaseTexImage);
 
     return 0;
 }
@@ -361,6 +389,14 @@ static void load_gles2(void)
     g_glBindFramebuffer = dlsym(h, "glBindFramebuffer");
     g_glGetIntegerv     = dlsym(h, "glGetIntegerv");
     g_glBlitFramebuffer = dlsym(h, "glBlitFramebuffer");
+    g_glGetError        = dlsym(h, "glGetError");
+    g_glGenTextures     = dlsym(h, "glGenTextures");
+    g_glBindTexture     = dlsym(h, "glBindTexture");
+    g_glGenFramebuffers = dlsym(h, "glGenFramebuffers");
+    g_glFramebufferTexture2D   = dlsym(h, "glFramebufferTexture2D");
+    g_glCheckFramebufferStatus = dlsym(h, "glCheckFramebufferStatus");
+    g_glDeleteTextures     = dlsym(h, "glDeleteTextures");
+    g_glDeleteFramebuffers = dlsym(h, "glDeleteFramebuffers");
 }
 #endif
 
@@ -676,6 +712,11 @@ static EGLSurface zc_pbuffer_for_bo(EGLShimDisplay *sd, EGLShimSurface *ss,
 #define WWN_GL_DRAW_FRAMEBUFFER_BINDING  0x8CA6
 #define WWN_GL_COLOR_BUFFER_BIT          0x4000
 #define WWN_GL_NEAREST                   0x2600
+#define WWN_GL_COLOR_ATTACHMENT0         0x8CE0
+#define WWN_GL_FRAMEBUFFER_COMPLETE      0x8CD5
+/* ANGLE's rectangle texture target, the one an IOSurface pbuffer binds to. */
+#define WWN_GL_TEXTURE_RECTANGLE            0x84F5
+#define WWN_GL_TEXTURE_BINDING_RECTANGLE    0x84F6
 
 /* An ANGLE pbuffer wrapping an IOSurface has the IOSurface as its colour
  * attachment and nothing else: no depth, no stencil, whatever the config asked
@@ -696,6 +737,12 @@ static EGLSurface zc_pbuffer_for_bo(EGLShimDisplay *sd, EGLShimSurface *ss,
 static EGLSurface zc_render_pbuffer(EGLShimDisplay *sd, EGLShimSurface *ss)
 {
     if (ss->render_pbuffer) return ss->render_pbuffer;
+    const char *blit = getenv("ILAND_EGL_DEPTH_BLIT");
+    if (blit && blit[0] == '0') {
+        fprintf(stderr, "iland: depth blit disabled, rendering into the "
+                        "IOSurface directly (GL_DEPTH_TEST will not work)\n");
+        return NULL;
+    }
     if (!g_glBlitFramebuffer || !g_glBindFramebuffer || !g_glGetIntegerv) {
         fprintf(stderr, "iland: no GLES3 blit, rendering into the IOSurface "
                         "directly (GL_DEPTH_TEST will not work)\n");
@@ -727,35 +774,131 @@ static EGLSurface zc_render_pbuffer(EGLShimDisplay *sd, EGLShimSurface *ss)
     return pb;
 }
 
-/* Copy the render pbuffer's colour into `dst_pb` (a slot's IOSurface), leaving
- * the render pbuffer current again. Read and draw surfaces differ, which is what
- * lets a blit cross two EGL surfaces. */
+/* Sample the middle of a presented IOSurface after the GPU work has landed, so
+ * a blank window can be attributed: content here means the compositor's import
+ * is at fault, all-zero means this side never wrote the buffer. Costs a CPU map
+ * of one page, so it runs for the first few frames of ILAND_EGL_DEBUG=1 only. */
+static void zc_probe_iosurface(IOSurfaceRef io, const char *what)
+{
+    static int probes_left = -1;
+    if (probes_left < 0) {
+        const char *e = getenv("ILAND_EGL_DEBUG");
+        probes_left = (e && e[0] == '1') ? 3 : 0;
+    }
+    if (probes_left == 0 || !io) return;
+    probes_left--;
+
+    if (IOSurfaceLock(io, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) {
+        fprintf(stderr, "iland: %s IOSurface lock failed\n", what);
+        return;
+    }
+    size_t w = IOSurfaceGetWidth(io), h = IOSurfaceGetHeight(io);
+    size_t stride = IOSurfaceGetBytesPerRow(io);
+    const uint8_t *base = IOSurfaceGetBaseAddress(io);
+    uint32_t centre = 0, corner = 0;
+    if (base && w && h) {
+        memcpy(&centre, base + (h / 2) * stride + (w / 2) * 4, 4);
+        memcpy(&corner, base + 4 * stride + 4 * 4, 4);
+    }
+    fprintf(stderr, "iland: %s %zux%zu centre=0x%08x near-corner=0x%08x\n",
+            what, w, h, centre, corner);
+    IOSurfaceUnlock(io, kIOSurfaceLockReadOnly, NULL);
+}
+
+static void zc_report_gl_error(const char *what)
+{
+    if (!g_glGetError) return;
+    unsigned int err = g_glGetError();
+    if (!err) return;
+    static unsigned int reported = 0;
+    if (reported == err) return;
+    reported = err;
+    fprintf(stderr, "iland: %s failed, GL error 0x%04x\n", what, err);
+}
+
+/* Copy the render pbuffer's colour into `dst_pb` (a slot's IOSurface). The
+ * client's context stays current on the render pbuffer throughout: the
+ * destination is reached as a texture, not as another surface's default
+ * framebuffer. Binding the IOSurface pbuffer as the draw *surface* and blitting
+ * default-to-default silently wrote nothing (no GL error, IOSurface all zero),
+ * whereas eglBindTexImage + an FBO colour attachment is the usage
+ * EGL_ANGLE_iosurface_client_buffer documents, and eglReleaseTexImage is what
+ * publishes the writes to the IOSurface. */
 static void zc_blit_to_slot(EGLShimDisplay *sd, EGLShimSurface *ss,
                             EGLSurface dst_pb)
 {
-    EGLSurface src = ss->render_pbuffer;
-    if (!src || !dst_pb) return;
+    if (!ss->render_pbuffer || !dst_pb) return;
+    if (!real_eglBindTexImage || !real_eglReleaseTexImage) return;
+    if (!g_glGenTextures || !g_glBindTexture || !g_glGenFramebuffers ||
+        !g_glFramebufferTexture2D)
+        return;
 
-    EGLContext ctx = real_eglGetCurrentContext ? real_eglGetCurrentContext()
-                                               : EGL_NO_CONTEXT;
-    if (ctx == EGL_NO_CONTEXT) return;
-    if (!real_eglMakeCurrent(sd->angle_display, dst_pb, src, ctx)) return;
+    if (!ss->blit_tex) {
+        g_glGenTextures(1, &ss->blit_tex);
+        g_glGenFramebuffers(1, &ss->blit_fbo);
+        if (!ss->blit_tex || !ss->blit_fbo) return;
+    }
 
-    /* The client may well have an FBO bound; the blit needs both defaults. */
-    int prev_draw = 0, prev_read = 0;
+    int prev_draw = 0, prev_read = 0, prev_tex = 0;
     g_glGetIntegerv(WWN_GL_DRAW_FRAMEBUFFER_BINDING, &prev_draw);
     g_glGetIntegerv(WWN_GL_READ_FRAMEBUFFER_BINDING, &prev_read);
-    g_glBindFramebuffer(WWN_GL_DRAW_FRAMEBUFFER, 0);
+    g_glGetIntegerv(WWN_GL_TEXTURE_BINDING_RECTANGLE, &prev_tex);
+
+    g_glBindTexture(WWN_GL_TEXTURE_RECTANGLE, ss->blit_tex);
+    if (!real_eglBindTexImage(sd->angle_display, dst_pb, EGL_BACK_BUFFER)) {
+        g_glBindTexture(WWN_GL_TEXTURE_RECTANGLE, (unsigned int)prev_tex);
+        static int warned = 0;
+        if (!warned) {
+            warned = 1;
+            fprintf(stderr, "iland: eglBindTexImage on the presented IOSurface "
+                            "failed (0x%04x)\n",
+                    real_eglGetError ? real_eglGetError() : 0);
+        }
+        return;
+    }
+
+    g_glBindFramebuffer(WWN_GL_DRAW_FRAMEBUFFER, ss->blit_fbo);
+    g_glFramebufferTexture2D(WWN_GL_DRAW_FRAMEBUFFER, WWN_GL_COLOR_ATTACHMENT0,
+                             WWN_GL_TEXTURE_RECTANGLE, ss->blit_tex, 0);
     g_glBindFramebuffer(WWN_GL_READ_FRAMEBUFFER, 0);
+
+    if (g_glCheckFramebufferStatus) {
+        unsigned int status = g_glCheckFramebufferStatus(WWN_GL_DRAW_FRAMEBUFFER);
+        if (status != WWN_GL_FRAMEBUFFER_COMPLETE) {
+            static unsigned int warned = 0;
+            if (warned != status) {
+                warned = status;
+                fprintf(stderr, "iland: IOSurface blit target incomplete "
+                                "(0x%04x)\n", status);
+            }
+        }
+    }
 
     g_glBlitFramebuffer(0, 0, (int)ss->width, (int)ss->height,
                         0, 0, (int)ss->width, (int)ss->height,
                         WWN_GL_COLOR_BUFFER_BIT, WWN_GL_NEAREST);
+    zc_report_gl_error("blit into the presented IOSurface");
 
+    /* Detach before release so the texture does not outlive the binding. */
+    g_glFramebufferTexture2D(WWN_GL_DRAW_FRAMEBUFFER, WWN_GL_COLOR_ATTACHMENT0,
+                             WWN_GL_TEXTURE_RECTANGLE, 0, 0);
     g_glBindFramebuffer(WWN_GL_DRAW_FRAMEBUFFER, (unsigned int)prev_draw);
     g_glBindFramebuffer(WWN_GL_READ_FRAMEBUFFER, (unsigned int)prev_read);
 
-    real_eglMakeCurrent(sd->angle_display, src, src, ctx);
+    real_eglReleaseTexImage(sd->angle_display, dst_pb, EGL_BACK_BUFFER);
+    g_glBindTexture(WWN_GL_TEXTURE_RECTANGLE, (unsigned int)prev_tex);
+}
+
+/* Only safe with the client's context still current, which holds for the
+ * eglDestroySurface path a client runs on its own thread. */
+static void zc_drop_blit_objects(EGLShimSurface *ss)
+{
+    if (ss->blit_fbo && g_glDeleteFramebuffers)
+        g_glDeleteFramebuffers(1, &ss->blit_fbo);
+    if (ss->blit_tex && g_glDeleteTextures)
+        g_glDeleteTextures(1, &ss->blit_tex);
+    ss->blit_fbo = 0;
+    ss->blit_tex = 0;
 }
 
 static void zc_drop_pbuffers(EGLShimDisplay *sd, EGLShimSurface *ss)
@@ -955,6 +1098,7 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
 
 #ifdef ILAND_HAVE_WL_WINSYS
     if (ss->wayland) {
+        zc_drop_blit_objects(ss);
         zc_drop_pbuffers(sd, ss);
         iland_wl_swapchain_destroy(ss->wl_swapchain);
         free(ss);
@@ -963,6 +1107,7 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
 #endif
 
     if (ss->zerocopy) {
+        zc_drop_blit_objects(ss);
         zc_drop_pbuffers(sd, ss);
     } else {
         real_eglDestroySurface(sd->angle_display, ss->angle_surface);
@@ -1007,6 +1152,10 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
 
         if (g_glFinish) g_glFinish();
         else if (real_eglWaitGL) real_eglWaitGL();
+
+        zc_probe_iosurface(iland_wl_swapchain_iosurface(ss->wl_swapchain,
+                                                        ss->wl_slot),
+                           "posting");
 
         iland_wl_swapchain_post(ss->wl_swapchain, ss->wl_slot);
 

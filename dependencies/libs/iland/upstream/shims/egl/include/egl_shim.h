@@ -52,6 +52,14 @@ typedef struct EGLShimSurface {
      * blit (GLES2-only), which falls back to drawing into the IOSurface. */
     EGLSurface render_pbuffer;
 
+    /* Destination of that blit: the slot's IOSurface bound as a rectangle
+     * texture (eglBindTexImage) and attached to this framebuffer, which is how
+     * EGL_ANGLE_iosurface_client_buffer is meant to be consumed. Blitting
+     * between two surfaces' *default* framebuffers instead wrote nothing and
+     * raised no GL error. Created lazily in the client's context. */
+    unsigned int blit_fbo;
+    unsigned int blit_tex;
+
     /* Wayland window surface. The swapchain owns the IOSurfaces and their
      * wl_buffers; iosurf_pbuffers[] above caches the ANGLE render target bound
      * to each slot. */
