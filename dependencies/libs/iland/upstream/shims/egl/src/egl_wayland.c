@@ -168,8 +168,19 @@ static void slot_free(IlandWlSlot *slot)
 
 static int slot_alloc(IlandWlSwapchain *sc, IlandWlSlot *slot)
 {
-    slot->info = DisplaySurface_create(sc->width, sc->height,
-                                       kWSPixelFormatBGRA);
+    /* Global: the compositor is a separate process for a bundled client, and
+     * all it gets is the id in the modifier. */
+    slot->info = DisplaySurface_create_global(sc->width, sc->height,
+                                              kWSPixelFormatBGRA);
+    if (slot->info.surface) {
+        /* ANGLE renders bottom-up into this and its Metal backend refuses
+         * EGL_ANGLE_surface_orientation, so the pixels really are upside down.
+         * The wl_buffer carries dmabuf Y_INVERT to say so, but the compositor
+         * reaches the IOSurface by id and hands it to CoreAnimation, which has
+         * no way back to the buffer's flags — so mark the surface itself. */
+        IOSurfaceSetValue(slot->info.surface, CFSTR("WWNBottomUp"),
+                          kCFBooleanTrue);
+    }
     if (!slot->info.surface)
         return -1;
 
@@ -200,9 +211,15 @@ static int slot_alloc(IlandWlSwapchain *sc, IlandWlSlot *slot)
                                    (uint32_t)(modifier & 0xffffffffULL));
     close(fd);
 
+    /* Y_INVERT: ANGLE renders bottom-up into the IOSurface and its Metal
+     * backend refuses EGL_ANGLE_surface_orientation, so the buffer genuinely is
+     * upside down and the protocol has a flag that says exactly that. Without
+     * it the compositor samples top-down and the scene comes out mirrored,
+     * which reads as broken depth testing rather than as a flip. */
     slot->buffer = zwp_linux_buffer_params_v1_create_immed(
         params, (int32_t)sc->width, (int32_t)sc->height,
-        DRM_FORMAT_ARGB8888, 0);
+        DRM_FORMAT_ARGB8888,
+        ZWP_LINUX_BUFFER_PARAMS_V1_FLAGS_Y_INVERT);
     zwp_linux_buffer_params_v1_destroy(params);
 
     if (!slot->buffer) {

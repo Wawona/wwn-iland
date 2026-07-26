@@ -42,7 +42,8 @@ static const uint32_t s_iosurfaceFormat[] = {
 // Implementation
 // ---------------------------------------------------------------------------
 
-DisplaySurfaceInfo DisplaySurface_create(uint32_t width, uint32_t height, WSPixelFormat fmt)
+static DisplaySurfaceInfo displaySurfaceCreate(uint32_t width, uint32_t height,
+                                              WSPixelFormat fmt, BOOL global)
 {
     DisplaySurfaceInfo info = {0};
     if (fmt < 1 || fmt > 11) return info;
@@ -56,6 +57,12 @@ DisplaySurfaceInfo DisplaySurface_create(uint32_t width, uint32_t height, WSPixe
     props[(id)kIOSurfaceBytesPerElement] = @(bpe);
     props[(id)kIOSurfacePixelFormat]     = @(fcc);
     props[@"IOSurfaceCacheMode"]         = @(0x700);
+    if (global) {
+        /* String literal rather than kIOSurfaceIsGlobal, which is deprecated
+         * and would warn; the key itself still works and is the only way to
+         * make IOSurfaceLookup resolve in another task. */
+        props[@"IOSurfaceIsGlobal"]      = @YES;
+    }
 
     IOSurfaceRef surf = IOSurfaceCreate((__bridge CFDictionaryRef)props);
     if (!surf) return info;
@@ -67,6 +74,17 @@ DisplaySurfaceInfo DisplaySurface_create(uint32_t width, uint32_t height, WSPixe
     info.bytesPerElement = bpe;
     info.wsFormat        = fmt;
     return info;
+}
+
+DisplaySurfaceInfo DisplaySurface_create(uint32_t width, uint32_t height, WSPixelFormat fmt)
+{
+    return displaySurfaceCreate(width, height, fmt, NO);
+}
+
+DisplaySurfaceInfo DisplaySurface_create_global(uint32_t width, uint32_t height,
+                                                WSPixelFormat fmt)
+{
+    return displaySurfaceCreate(width, height, fmt, YES);
 }
 
 void DisplaySurface_destroy(DisplaySurfaceInfo *info)

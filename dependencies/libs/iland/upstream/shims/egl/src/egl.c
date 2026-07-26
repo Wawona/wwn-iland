@@ -125,6 +125,12 @@ ANGLE_FN(eglGetProcAddress);
 
 static void (*g_glReadPixels)(int, int, int, int, unsigned int, unsigned int, void *) = NULL;
 static void (*g_glFinish)(void) = NULL;
+/* GLES3; NULL on a GLES2-only driver, which then keeps the old direct-render
+ * path (and its missing depth buffer) — see zc_render_pbuffer. */
+static void (*g_glBindFramebuffer)(unsigned int, unsigned int) = NULL;
+static void (*g_glGetIntegerv)(unsigned int, int *) = NULL;
+static void (*g_glBlitFramebuffer)(int, int, int, int, int, int, int, int,
+                                   unsigned int, unsigned int) = NULL;
 
 /* EGL_ANGLE_iosurface_client_buffer constants (ANGLE-specific; not in stock
  * EGL/egl.h). Values are stable across ANGLE releases. */
@@ -231,6 +237,12 @@ static void load_gles2(void)
     if (g_glReadPixels) return;
     g_glReadPixels = glReadPixels;
     g_glFinish = glFinish;
+    g_glBindFramebuffer = glBindFramebuffer;
+    g_glGetIntegerv = glGetIntegerv;
+    if (real_eglGetProcAddress)
+        g_glBlitFramebuffer = (void (*)(int, int, int, int, int, int, int, int,
+                                        unsigned int, unsigned int))
+            real_eglGetProcAddress("glBlitFramebuffer");
 }
 #else
 static void *open_angle_library(const char *path)
@@ -346,6 +358,9 @@ static void load_gles2(void)
     if (!h) return;
     g_glReadPixels = dlsym(h, "glReadPixels");
     g_glFinish    = dlsym(h, "glFinish");
+    g_glBindFramebuffer = dlsym(h, "glBindFramebuffer");
+    g_glGetIntegerv     = dlsym(h, "glGetIntegerv");
+    g_glBlitFramebuffer = dlsym(h, "glBlitFramebuffer");
 }
 #endif
 
@@ -634,6 +649,12 @@ static EGLSurface zc_pbuffer_for_iosurface(EGLShimDisplay *sd,
         EGL_NONE
     };
 
+    /* GL renders bottom-up into these, so the IOSurface is upside down relative
+     * to how anything downstream samples it. EGL_ANGLE_surface_orientation
+     * would let ANGLE invert while rendering, but the Metal backend rejects it
+     * on IOSurface pbuffers, so the flip is handled where the buffer is
+     * consumed: the KMS presenter's blit shader, and — for Wayland — the
+     * dmabuf Y_INVERT flag the winsys sets on the wl_buffer. */
     EGLSurface s = real_eglCreatePbufferFromClientBuffer(
         sd->angle_display, EGL_IOSURFACE_ANGLE,
         (EGLClientBuffer)io, ss->config, attribs);
@@ -648,6 +669,95 @@ static EGLSurface zc_pbuffer_for_bo(EGLShimDisplay *sd, EGLShimSurface *ss,
 }
 
 #ifdef ILAND_HAVE_WL_WINSYS
+/* GLES3 enums; GLES2/gl2.h predates them. */
+#define WWN_GL_READ_FRAMEBUFFER          0x8CA8
+#define WWN_GL_DRAW_FRAMEBUFFER          0x8CA9
+#define WWN_GL_READ_FRAMEBUFFER_BINDING  0x8CAA
+#define WWN_GL_DRAW_FRAMEBUFFER_BINDING  0x8CA6
+#define WWN_GL_COLOR_BUFFER_BIT          0x4000
+#define WWN_GL_NEAREST                   0x2600
+
+/* An ANGLE pbuffer wrapping an IOSurface has the IOSurface as its colour
+ * attachment and nothing else: no depth, no stencil, whatever the config asked
+ * for. glGetFramebufferAttachmentParameteriv still answers from the config, so
+ * a client sees a depth attachment, enables GL_DEPTH_TEST, and gets a scene
+ * where far triangles paint over near ones — which reads as broken face
+ * culling, not as a missing buffer.
+ *
+ * So the client renders into an ordinary pbuffer of the same config, which does
+ * get its depth and stencil, and each swap blits the colour into the slot's
+ * IOSurface. One offscreen surface for the whole swapchain (it is consumed every
+ * frame) and one full-surface GPU blit per frame; no CPU copy, so the dmabuf
+ * export stays zero-copy. The blit is straight, not flipped: both sides are GL
+ * surfaces, so the IOSurface is bottom-up exactly as before.
+ *
+ * NULL if GLES3 blitting is unavailable, in which case callers render into the
+ * IOSurface directly and depth stays broken. */
+static EGLSurface zc_render_pbuffer(EGLShimDisplay *sd, EGLShimSurface *ss)
+{
+    if (ss->render_pbuffer) return ss->render_pbuffer;
+    if (!g_glBlitFramebuffer || !g_glBindFramebuffer || !g_glGetIntegerv) {
+        fprintf(stderr, "iland: no GLES3 blit, rendering into the IOSurface "
+                        "directly (GL_DEPTH_TEST will not work)\n");
+        return NULL;
+    }
+    if (!real_eglCreatePbufferSurface) return NULL;
+
+    const EGLint attribs[] = {
+        EGL_WIDTH,  (EGLint)ss->width,
+        EGL_HEIGHT, (EGLint)ss->height,
+        EGL_NONE
+    };
+    EGLSurface pb = real_eglCreatePbufferSurface(sd->angle_display,
+                                                ss->config, attribs);
+    if (pb == EGL_NO_SURFACE) {
+        fprintf(stderr, "iland: render pbuffer %ux%u failed, rendering into the "
+                        "IOSurface directly (GL_DEPTH_TEST will not work)\n",
+                ss->width, ss->height);
+        return NULL;
+    }
+    EGLint depth = -1;
+    if (real_eglGetConfigAttrib)
+        real_eglGetConfigAttrib(sd->angle_display, ss->config,
+                                EGL_DEPTH_SIZE, &depth);
+    fprintf(stderr, "iland: rendering into a %ux%u pbuffer, depth %d bits, "
+                    "blitting to the presented IOSurface\n",
+            ss->width, ss->height, depth);
+    ss->render_pbuffer = pb;
+    return pb;
+}
+
+/* Copy the render pbuffer's colour into `dst_pb` (a slot's IOSurface), leaving
+ * the render pbuffer current again. Read and draw surfaces differ, which is what
+ * lets a blit cross two EGL surfaces. */
+static void zc_blit_to_slot(EGLShimDisplay *sd, EGLShimSurface *ss,
+                            EGLSurface dst_pb)
+{
+    EGLSurface src = ss->render_pbuffer;
+    if (!src || !dst_pb) return;
+
+    EGLContext ctx = real_eglGetCurrentContext ? real_eglGetCurrentContext()
+                                               : EGL_NO_CONTEXT;
+    if (ctx == EGL_NO_CONTEXT) return;
+    if (!real_eglMakeCurrent(sd->angle_display, dst_pb, src, ctx)) return;
+
+    /* The client may well have an FBO bound; the blit needs both defaults. */
+    int prev_draw = 0, prev_read = 0;
+    g_glGetIntegerv(WWN_GL_DRAW_FRAMEBUFFER_BINDING, &prev_draw);
+    g_glGetIntegerv(WWN_GL_READ_FRAMEBUFFER_BINDING, &prev_read);
+    g_glBindFramebuffer(WWN_GL_DRAW_FRAMEBUFFER, 0);
+    g_glBindFramebuffer(WWN_GL_READ_FRAMEBUFFER, 0);
+
+    g_glBlitFramebuffer(0, 0, (int)ss->width, (int)ss->height,
+                        0, 0, (int)ss->width, (int)ss->height,
+                        WWN_GL_COLOR_BUFFER_BIT, WWN_GL_NEAREST);
+
+    g_glBindFramebuffer(WWN_GL_DRAW_FRAMEBUFFER, (unsigned int)prev_draw);
+    g_glBindFramebuffer(WWN_GL_READ_FRAMEBUFFER, (unsigned int)prev_read);
+
+    real_eglMakeCurrent(sd->angle_display, src, src, ctx);
+}
+
 static void zc_drop_pbuffers(EGLShimDisplay *sd, EGLShimSurface *ss)
 {
     for (size_t i = 0; i < sizeof(ss->iosurf_pbuffers) /
@@ -657,11 +767,18 @@ static void zc_drop_pbuffers(EGLShimDisplay *sd, EGLShimSurface *ss)
             ss->iosurf_pbuffers[i] = NULL;
         }
     }
+    /* Sized to the old surface, so it goes too; EGL defers the destroy while it
+     * is still current, and wl_bind_slot rebinds the replacement. */
+    if (ss->render_pbuffer) {
+        real_eglDestroySurface(sd->angle_display, ss->render_pbuffer);
+        ss->render_pbuffer = NULL;
+    }
 }
 
-/* Bind swapchain slot `slot` as the current draw/read surface. The default
- * framebuffer changes with every slot, so the context has to be re-made
- * current — same requirement as advancing a gbm bo. */
+/* Make swapchain slot `slot` the one the next swap presents. With the render
+ * pbuffer in play the drawing target never changes, so this is bookkeeping;
+ * without it the slot's IOSurface *is* the default framebuffer and the context
+ * has to be re-made current, as when advancing a gbm bo. */
 static EGLBoolean wl_bind_slot(EGLShimDisplay *sd, EGLShimSurface *ss, int slot)
 {
     IOSurfaceRef io = iland_wl_swapchain_iosurface(ss->wl_swapchain, slot);
@@ -669,6 +786,23 @@ static EGLBoolean wl_bind_slot(EGLShimDisplay *sd, EGLShimSurface *ss, int slot)
     if (!pb) return EGL_FALSE;
 
     ss->wl_slot = slot;
+
+    EGLSurface prev_render = ss->render_pbuffer;
+    EGLSurface render = zc_render_pbuffer(sd, ss);
+    if (render) {
+        ss->angle_surface = render;
+        /* A resize replaced it, so the context is still drawing into the old
+         * one; first bind needs no help, the client makes current itself. */
+        if (render != prev_render) {
+            EGLContext cur = real_eglGetCurrentContext
+                                 ? real_eglGetCurrentContext()
+                                 : EGL_NO_CONTEXT;
+            if (cur != EGL_NO_CONTEXT)
+                real_eglMakeCurrent(sd->angle_display, render, render, cur);
+        }
+        return EGL_TRUE;
+    }
+
     ss->angle_surface = pb;
 
     EGLContext cur = real_eglGetCurrentContext ? real_eglGetCurrentContext()
@@ -716,7 +850,10 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
             return EGL_NO_SURFACE;
         }
         ws->wl_slot = 0;
-        ws->angle_surface = pb;
+        /* Draw into a depth-capable pbuffer from the first frame, not just from
+         * the first swap; the IOSurface pbuffer above is only a blit target. */
+        EGLSurface render = zc_render_pbuffer(sd, ws);
+        ws->angle_surface = render ? render : pb;
         return (EGLSurface)ws;
     }
 #endif
@@ -738,7 +875,10 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
         struct gbm_bo *wbo = gbm_surface_get_write_bo(gs);
         EGLSurface pb = zc_pbuffer_for_bo(sd, ss, gs->write_idx, wbo);
         if (pb) {
-            ss->angle_surface = pb;
+            /* Draw into a depth-capable pbuffer and blit per swap where the
+             * driver allows; the bo's IOSurface alone has no depth. */
+            EGLSurface render = zc_render_pbuffer(sd, ss);
+            ss->angle_surface = render ? render : pb;
             return (EGLSurface)ss;
         }
         /* Fall back to the copy path if ANGLE can't bind the IOSurface. */
@@ -780,12 +920,7 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
 #endif
 
     if (ss->zerocopy) {
-        for (size_t i = 0; i < sizeof(ss->iosurf_pbuffers) /
-                               sizeof(ss->iosurf_pbuffers[0]); i++) {
-            if (ss->iosurf_pbuffers[i])
-                real_eglDestroySurface(sd->angle_display,
-                                       ss->iosurf_pbuffers[i]);
-        }
+        zc_drop_pbuffers(sd, ss);
     } else {
         real_eglDestroySurface(sd->angle_display, ss->angle_surface);
     }
@@ -820,8 +955,13 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
 
 #ifdef ILAND_HAVE_WL_WINSYS
     if (ss->wayland) {
-        /* ANGLE rendered straight into the slot's IOSurface. Land the GPU work,
-         * hand the buffer to the compositor, then draw into a released slot. */
+        /* The frame is in the render pbuffer (or, without one, already in the
+         * slot's IOSurface). Land the GPU work, hand the buffer to the
+         * compositor, then draw into a released slot. */
+        if (ss->render_pbuffer)
+            zc_blit_to_slot(sd, ss,
+                            ss->iosurf_pbuffers[ss->wl_slot]);
+
         if (g_glFinish) g_glFinish();
         else if (real_eglWaitGL) real_eglWaitGL();
 
@@ -843,9 +983,12 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
     struct gbm_surface *gs = ss->gbm_surface;
 
     if (ss->zerocopy) {
-        /* Content is already in the current write bo's IOSurface (ANGLE
-         * rendered straight into it). Make sure the GPU work has landed,
+        /* Content is in the render pbuffer, or — without one — already in the
+         * current write bo's IOSurface. Make sure the GPU work has landed,
          * publish the bo, and bind the next write bo for the next frame. */
+        if (ss->render_pbuffer)
+            zc_blit_to_slot(sd, ss, ss->iosurf_pbuffers[gs->write_idx]);
+
         if (g_glFinish) g_glFinish();
         else if (real_eglWaitGL) real_eglWaitGL();
 
@@ -853,7 +996,7 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
 
         struct gbm_bo *next = gbm_surface_get_write_bo(gs);
         EGLSurface next_pb = zc_pbuffer_for_bo(sd, ss, gs->write_idx, next);
-        if (next_pb) {
+        if (next_pb && !ss->render_pbuffer) {
             ss->angle_surface = next_pb;
             EGLContext cur = real_eglGetCurrentContext
                                  ? real_eglGetCurrentContext()

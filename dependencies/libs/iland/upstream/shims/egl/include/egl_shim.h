@@ -45,6 +45,13 @@ typedef struct EGLShimSurface {
     EGLConfig  config;
     EGLSurface iosurf_pbuffers[4];
 
+    /* Where the client actually draws, blitted into the presented IOSurface at
+     * swap. An IOSurface pbuffer has no depth or stencil however the config was
+     * chosen, so rendering straight into one silently breaks GL_DEPTH_TEST; a
+     * plain pbuffer of the same config gets both. NULL when the driver cannot
+     * blit (GLES2-only), which falls back to drawing into the IOSurface. */
+    EGLSurface render_pbuffer;
+
     /* Wayland window surface. The swapchain owns the IOSurfaces and their
      * wl_buffers; iosurf_pbuffers[] above caches the ANGLE render target bound
      * to each slot. */
