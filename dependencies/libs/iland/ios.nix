@@ -172,6 +172,12 @@ EOF
 
     "$AR" rcs libiland_wayland_egl.a iland_wayland_egl.o
 
+    VK_WL_CFLAGS="$COMMON_FLAGS -Ishims/vulkan-wayland/include -I${pkgs.vulkan-headers}/include"
+    echo "CC shims/vulkan-wayland/src/vk_wayland_wsi.c"
+    "$CLANG" -c shims/vulkan-wayland/src/vk_wayland_wsi.c $VK_WL_CFLAGS \
+      -o vk_wayland_wsi.o
+    "$AR" rcs libiland_wayland_vulkan.a vk_wayland_wsi.o
+
     runHook postBuild
   '';
 
@@ -180,6 +186,7 @@ EOF
 
     cp libiland_userland.a $out/lib/
     cp libiland_wayland_egl.a $out/lib/
+    cp libiland_wayland_vulkan.a $out/lib/
 
     cp shims/gbm/include/gbm.h                       $out/include/
     cp shims/egl/include/egl_shim.h                  $out/include/
@@ -187,6 +194,7 @@ EOF
     # NOT also link libwayland-egl (that one is an abort-on-call vendor stub).
     cp shims/egl/include/iland_wl_winsys.h           $out/include/
     cp shims/wayland-egl/include/iland_wayland_egl.h $out/include/
+    cp shims/vulkan-wayland/include/iland_vk_wayland.h $out/include/
     cp shims/drm/displaysurface/include/DisplaySurface.h $out/include/
     cp shims/include/drm_fourcc.h                    $out/include/
     cp shims/include/xf86drm.h                       $out/include/

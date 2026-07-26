@@ -145,6 +145,14 @@ pkgs.stdenv.mkDerivation {
 
     "$AR" rcs libiland_wayland_egl.a iland_wayland_egl.o
 
+    # Vulkan Wayland WSI (VK_KHR_wayland_surface + swapchain over the same
+    # IOSurface dmabuf winsys). Separate archive so GLES-only clients skip it.
+    VK_WL_CFLAGS="$COMMON_FLAGS -Ishims/vulkan-wayland/include -I${pkgs.vulkan-headers}/include"
+    echo "CC shims/vulkan-wayland/src/vk_wayland_wsi.c"
+    "$CLANG" -c shims/vulkan-wayland/src/vk_wayland_wsi.c $VK_WL_CFLAGS \
+      -o vk_wayland_wsi.o
+    "$AR" rcs libiland_wayland_vulkan.a vk_wayland_wsi.o
+
     runHook postBuild
   '';
 
@@ -153,6 +161,7 @@ pkgs.stdenv.mkDerivation {
 
     cp libiland_userland.a $out/lib/
     cp libiland_wayland_egl.a $out/lib/
+    cp libiland_wayland_vulkan.a $out/lib/
 
     # Public client-facing headers
     cp shims/gbm/include/gbm.h                       $out/include/
@@ -161,6 +170,7 @@ pkgs.stdenv.mkDerivation {
     # NOT also link libwayland-egl (its vendor stub aborts) — link iland instead.
     cp shims/egl/include/iland_wl_winsys.h           $out/include/
     cp shims/wayland-egl/include/iland_wayland_egl.h $out/include/
+    cp shims/vulkan-wayland/include/iland_vk_wayland.h $out/include/
     cp shims/drm/displaysurface/include/DisplaySurface.h $out/include/
     cp shims/include/drm_fourcc.h                    $out/include/
     cp shims/include/xf86drm.h                       $out/include/

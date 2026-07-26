@@ -50,6 +50,7 @@ struct IlandWlSwapchain {
     struct wl_surface *surface;
     uint32_t width;
     uint32_t height;
+    int orientation; /* ILAND_WL_SWAPCHAIN_TOP_DOWN or BOTTOM_UP */
     IlandWlSlot slots[ILAND_WL_SWAPCHAIN_DEPTH];
     int pending_dx;
     int pending_dy;
@@ -172,7 +173,7 @@ static int slot_alloc(IlandWlSwapchain *sc, IlandWlSlot *slot)
      * all it gets is the id in the modifier. */
     slot->info = DisplaySurface_create_global(sc->width, sc->height,
                                               kWSPixelFormatBGRA);
-    if (slot->info.surface) {
+    if (slot->info.surface && sc->orientation == ILAND_WL_SWAPCHAIN_BOTTOM_UP) {
         /* ANGLE renders bottom-up into this and its Metal backend refuses
          * EGL_ANGLE_surface_orientation, so the pixels really are upside down.
          * The wl_buffer carries dmabuf Y_INVERT to say so, but the compositor
@@ -211,15 +212,14 @@ static int slot_alloc(IlandWlSwapchain *sc, IlandWlSlot *slot)
                                    (uint32_t)(modifier & 0xffffffffULL));
     close(fd);
 
-    /* Y_INVERT: ANGLE renders bottom-up into the IOSurface and its Metal
-     * backend refuses EGL_ANGLE_surface_orientation, so the buffer genuinely is
-     * upside down and the protocol has a flag that says exactly that. Without
-     * it the compositor samples top-down and the scene comes out mirrored,
-     * which reads as broken depth testing rather than as a flip. */
+    /* Y_INVERT only when the producer wrote bottom-up (ANGLE). Vulkan staging
+     * blits are top-down and must not set the flag. */
+    uint32_t flags = 0;
+    if (sc->orientation == ILAND_WL_SWAPCHAIN_BOTTOM_UP)
+        flags = ZWP_LINUX_BUFFER_PARAMS_V1_FLAGS_Y_INVERT;
     slot->buffer = zwp_linux_buffer_params_v1_create_immed(
         params, (int32_t)sc->width, (int32_t)sc->height,
-        DRM_FORMAT_ARGB8888,
-        ZWP_LINUX_BUFFER_PARAMS_V1_FLAGS_Y_INVERT);
+        DRM_FORMAT_ARGB8888, flags);
     zwp_linux_buffer_params_v1_destroy(params);
 
     if (!slot->buffer) {
@@ -259,6 +259,34 @@ static int slots_alloc(IlandWlSwapchain *sc)
  * Swapchain
  * ------------------------------------------------------------------------- */
 
+IlandWlSwapchain *iland_wl_swapchain_create_for_surface(
+    IlandWlWinsys *ws, struct wl_surface *surface, uint32_t width,
+    uint32_t height, int orientation)
+{
+    if (!ws || !ws->dmabuf || !surface || width == 0 || height == 0)
+        return NULL;
+
+    IlandWlSwapchain *sc = calloc(1, sizeof(*sc));
+    if (!sc)
+        return NULL;
+
+    sc->ws = ws;
+    sc->win = NULL;
+    sc->surface = surface;
+    sc->width = width;
+    sc->height = height;
+    sc->orientation = (orientation == ILAND_WL_SWAPCHAIN_BOTTOM_UP)
+                          ? ILAND_WL_SWAPCHAIN_BOTTOM_UP
+                          : ILAND_WL_SWAPCHAIN_TOP_DOWN;
+
+    if (slots_alloc(sc) != 0) {
+        free(sc);
+        return NULL;
+    }
+
+    return sc;
+}
+
 IlandWlSwapchain *iland_wl_swapchain_create(IlandWlWinsys *ws,
                                             struct wl_egl_window *win)
 {
@@ -269,28 +297,16 @@ IlandWlSwapchain *iland_wl_swapchain_create(IlandWlWinsys *ws,
     if (!surface)
         return NULL;
 
-    IlandWlSwapchain *sc = calloc(1, sizeof(*sc));
-    if (!sc)
-        return NULL;
-
-    sc->ws = ws;
-    sc->win = win;
-    sc->surface = surface;
-
     int w = 0, h = 0;
     iland_wl_egl_window_get_size(win, &w, &h);
-    if (w <= 0 || h <= 0) {
-        free(sc);
+    if (w <= 0 || h <= 0)
         return NULL;
-    }
-    sc->width = (uint32_t)w;
-    sc->height = (uint32_t)h;
 
-    if (slots_alloc(sc) != 0) {
-        free(sc);
+    IlandWlSwapchain *sc = iland_wl_swapchain_create_for_surface(
+        ws, surface, (uint32_t)w, (uint32_t)h, ILAND_WL_SWAPCHAIN_BOTTOM_UP);
+    if (!sc)
         return NULL;
-    }
-
+    sc->win = win;
     return sc;
 }
 
@@ -369,13 +385,68 @@ int iland_wl_swapchain_post(IlandWlSwapchain *sc, int slot)
     wl_display_flush(sc->ws->display);
 
     s->busy = 1;
-    iland_wl_egl_window_set_attached(sc->win, (int)sc->width, (int)sc->height);
+    if (sc->win)
+        iland_wl_egl_window_set_attached(sc->win, (int)sc->width,
+                                         (int)sc->height);
     return 0;
+}
+
+int iland_wl_swapchain_present_pixels(IlandWlSwapchain *sc, const void *pixels,
+                                      uint32_t stride_bytes)
+{
+    if (!sc || !pixels || stride_bytes == 0)
+        return -1;
+
+    int slot = iland_wl_swapchain_acquire(sc);
+    if (slot < 0)
+        return -1;
+
+    IlandWlSlot *s = &sc->slots[slot];
+    IOSurfaceRef io = s->info.surface;
+    if (!io || !s->buffer)
+        return -1;
+
+    if (IOSurfaceLock(io, 0, NULL) != kIOReturnSuccess)
+        return -1;
+
+    void *base = IOSurfaceGetBaseAddress(io);
+    size_t dst_stride = IOSurfaceGetBytesPerRow(io);
+    size_t row_bytes = (size_t)sc->width * 4u;
+    if (!base || dst_stride < row_bytes || stride_bytes < row_bytes) {
+        IOSurfaceUnlock(io, 0, NULL);
+        return -1;
+    }
+
+    const uint8_t *src = (const uint8_t *)pixels;
+    uint8_t *dst = (uint8_t *)base;
+    for (uint32_t y = 0; y < sc->height; y++) {
+        memcpy(dst + (size_t)y * dst_stride,
+               src + (size_t)y * stride_bytes, row_bytes);
+    }
+    IOSurfaceUnlock(io, 0, NULL);
+
+    return iland_wl_swapchain_post(sc, slot);
+}
+
+int iland_wl_swapchain_resize(IlandWlSwapchain *sc, uint32_t width,
+                              uint32_t height)
+{
+    if (!sc || width == 0 || height == 0)
+        return 0;
+    if (sc->width == width && sc->height == height)
+        return 0;
+
+    slots_free(sc);
+    sc->width = width;
+    sc->height = height;
+    if (slots_alloc(sc) != 0)
+        return -1;
+    return 1;
 }
 
 int iland_wl_swapchain_check_resize(IlandWlSwapchain *sc)
 {
-    if (!sc)
+    if (!sc || !sc->win)
         return 0;
 
     int dx = 0, dy = 0;
