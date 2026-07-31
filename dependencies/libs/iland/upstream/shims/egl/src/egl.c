@@ -128,8 +128,11 @@ ANGLE_FN(eglCreatePbufferSurface);
 ANGLE_FN(eglCreatePbufferFromClientBuffer);
 ANGLE_FN(eglGetCurrentContext);
 ANGLE_FN(eglGetProcAddress);
-ANGLE_FN(eglBindTexImage);
-ANGLE_FN(eglReleaseTexImage);
+/* typeof(&angle_eglBindTexImage) would require that symbol at link time on
+ * some toolchains; visionOS ANGLE only exports the unprefixed names. */
+static EGLBoolean (*real_eglBindTexImage)(EGLDisplay, EGLSurface, EGLint) = NULL;
+static EGLBoolean (*real_eglReleaseTexImage)(EGLDisplay, EGLSurface, EGLint) =
+    NULL;
 
 static void (*g_glReadPixels)(int, int, int, int, unsigned int, unsigned int, void *) = NULL;
 static void (*g_glFinish)(void) = NULL;
@@ -290,8 +293,16 @@ static int load_angle(void)
     LOAD(eglCreatePbufferFromClientBuffer);
     LOAD(eglGetCurrentContext);
     LOAD(eglGetProcAddress);
-    LOAD(eglBindTexImage);
-    LOAD(eglReleaseTexImage);
+    /* Do not take &angle_eglBindTexImage — visionOS static ANGLE still exports
+     * these two without the angle_ prefix, so a direct reference fails link.
+     * Resolve via ANGLE's own GetProcAddress instead. */
+    real_eglBindTexImage = real_eglGetProcAddress
+        ? (__typeof__(real_eglBindTexImage))real_eglGetProcAddress("eglBindTexImage")
+        : NULL;
+    real_eglReleaseTexImage = real_eglGetProcAddress
+        ? (__typeof__(real_eglReleaseTexImage))
+              real_eglGetProcAddress("eglReleaseTexImage")
+        : NULL;
 
     return 0;
 }
@@ -905,7 +916,9 @@ static void zc_probe_iosurface(IOSurfaceRef io, const char *what)
     if (probes_left == 0 || !io) return;
     probes_left--;
 
-    if (IOSurfaceLock(io, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) {
+    /* Success is 0 (IOReturn). Do not use kIOReturnSuccess — it lives in
+     * IOKit, which iOS/tvOS/watchOS SDKs do not expose to this TU. */
+    if (IOSurfaceLock(io, kIOSurfaceLockReadOnly, NULL) != 0) {
         fprintf(stderr, "iland: %s IOSurface lock failed\n", what);
         return;
     }
@@ -1395,6 +1408,11 @@ EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval)
  * EGL_PLATFORM_WAYLAND — a client that resolves them dynamically would escape
  * the shim and get NULL displays. weston-simple-egl does exactly that, via
  * shared/platform.h's eglGetProcAddress("eglGetPlatformDisplayEXT"). */
+/* Forward decl: under ILAND_ANGLE_STATIC the ANGLE rename/#undef leaves no
+ * prototype from <EGL/egl.h>, and the table below takes our address before
+ * the definition. */
+__eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *procname);
+
 static const struct {
     const char *name;
     void *fn;

@@ -164,6 +164,9 @@ PY
     "$AR" rcs libiland_userland.a $OBJS
 
     # Wayland-EGL winsys (AHB id in dmabuf modifier — same #86 convention).
+    # Partial-link then localize zwp_linux_* so they do not clash with weston's
+    # copies when both archives are --whole-archive into libwawona.so (same
+    # problem ios.nix solves with -unexported_symbols_list).
     WL_OBJS=""
     for src in \
       shims/wayland-egl/src/wayland_egl.c \
@@ -174,7 +177,10 @@ PY
       "$CC" -c "$src" $COMMON_FLAGS -o "$obj"
       WL_OBJS="$WL_OBJS $obj"
     done
-    "$AR" rcs libiland_wayland_egl.a $WL_OBJS
+    "$CC" -r -nostdlib $COMMON_FLAGS -o iland_wayland_egl.o $WL_OBJS
+    OBJCOPY="$("$CC" -print-prog-name=llvm-objcopy)"
+    "$OBJCOPY" --wildcard --localize-symbol='zwp_linux_*' iland_wayland_egl.o
+    "$AR" rcs libiland_wayland_egl.a iland_wayland_egl.o
 
     # Vulkan Wayland WSI (optional; ICD-neutral present_pixels path).
     if [ -f shims/vulkan-wayland/src/vk_wayland_wsi.c ]; then

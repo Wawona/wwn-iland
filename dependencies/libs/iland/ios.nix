@@ -166,9 +166,15 @@ EOF
     # into one object first — the reference and the definition must end up in
     # the same object for privatising to leave anything resolvable — then hide
     # the protocol globals. Same treatment foot's protocol symbols get.
+    #
+    # Drive ld -r through clang with the same -isysroot / min-version as the
+    # .o compile. Bare `ld -r -arch arm64` defaults to the macOS platform and
+    # then rejects iOS Simulator objects ("building for macOS, but linking in
+    # object file built for iOS Simulator").
     echo "_zwp_linux_*" > unexported-protocol.txt
-    ld -r -arch arm64 -o iland_wayland_egl.o $WL_OBJS \
-      -unexported_symbols_list unexported-protocol.txt
+    "$CLANG" -r -nostdlib -arch arm64 -isysroot "$SDKROOT" ${minFlag} \
+      -o iland_wayland_egl.o $WL_OBJS \
+      -Wl,-unexported_symbols_list,unexported-protocol.txt
 
     "$AR" rcs libiland_wayland_egl.a iland_wayland_egl.o
 

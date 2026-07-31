@@ -406,7 +406,8 @@ int iland_wl_swapchain_present_pixels(IlandWlSwapchain *sc, const void *pixels,
     if (!io || !s->buffer)
         return -1;
 
-    if (IOSurfaceLock(io, 0, NULL) != kIOReturnSuccess)
+    /* Success is 0; avoid kIOReturnSuccess (IOKit — missing on iOS family). */
+    if (IOSurfaceLock(io, 0, NULL) != 0)
         return -1;
 
     void *base = IOSurfaceGetBaseAddress(io);
