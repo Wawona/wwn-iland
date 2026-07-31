@@ -19,6 +19,35 @@ struct ILandIOSurface {
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_next_id = 1;
+#define ILAND_IO_REGISTRY_CAP 256
+static IOSurfaceRef g_registry[ILAND_IO_REGISTRY_CAP];
+
+static void registry_put(IOSurfaceRef surf)
+{
+    if (!surf || surf->id == 0)
+        return;
+    uint32_t slot = surf->id % ILAND_IO_REGISTRY_CAP;
+    /* Linear probe within the table; ids are dense so collisions are rare. */
+    for (uint32_t i = 0; i < ILAND_IO_REGISTRY_CAP; i++) {
+        uint32_t idx = (slot + i) % ILAND_IO_REGISTRY_CAP;
+        if (!g_registry[idx] || g_registry[idx] == surf) {
+            g_registry[idx] = surf;
+            return;
+        }
+    }
+}
+
+static void registry_remove(IOSurfaceRef surf)
+{
+    if (!surf || surf->id == 0)
+        return;
+    for (uint32_t i = 0; i < ILAND_IO_REGISTRY_CAP; i++) {
+        if (g_registry[i] == surf) {
+            g_registry[i] = NULL;
+            return;
+        }
+    }
+}
 
 IOSurfaceRef ILandIOSurfaceCreate(uint32_t width, uint32_t height, uint32_t bpe)
 {
@@ -57,9 +86,29 @@ IOSurfaceRef ILandIOSurfaceCreate(uint32_t width, uint32_t height, uint32_t bpe)
 
     pthread_mutex_lock(&g_lock);
     surf->id = g_next_id++;
+    if (surf->id == 0)
+        surf->id = g_next_id++;
+    registry_put(surf);
     pthread_mutex_unlock(&g_lock);
     surf->refcount = 1;
     return surf;
+}
+
+IOSurfaceRef ILandIOSurfaceLookup(uint32_t id)
+{
+    if (id == 0)
+        return NULL;
+    pthread_mutex_lock(&g_lock);
+    IOSurfaceRef found = NULL;
+    for (uint32_t i = 0; i < ILAND_IO_REGISTRY_CAP; i++) {
+        if (g_registry[i] && g_registry[i]->id == id) {
+            found = g_registry[i];
+            found->refcount++;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return found;
 }
 
 void ILandIOSurfaceRetain(IOSurfaceRef surf)
@@ -73,8 +122,13 @@ void ILandIOSurfaceRelease(IOSurfaceRef surf)
 {
     if (!surf)
         return;
-    if (--surf->refcount > 0)
+    pthread_mutex_lock(&g_lock);
+    if (--surf->refcount > 0) {
+        pthread_mutex_unlock(&g_lock);
         return;
+    }
+    registry_remove(surf);
+    pthread_mutex_unlock(&g_lock);
     AHardwareBuffer_release(surf->hardware_buffer);
     free(surf);
 }

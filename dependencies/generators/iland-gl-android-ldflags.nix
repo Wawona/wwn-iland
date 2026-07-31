@@ -29,6 +29,19 @@ let
       ]
     else
       [ ];
+  # Wayland-EGL winsys (AHB dmabuf post). Whole-archive so the constructor
+  # registers iland_wl_ops; absent on older iland builds.
+  ilandWaylandEglArchive =
+    let archive = "${strip iland}/lib/libiland_wayland_egl.a";
+    in if iland != null && builtins.pathExists archive then
+      [
+        "-Wl,--whole-archive"
+        archive
+        "-Wl,--no-whole-archive"
+        "-lwayland-client"
+      ]
+    else
+      [ ];
   clientArchives = lib.concatLists (lib.map (client:
     if client.pkg != null then
       [
@@ -66,4 +79,4 @@ let
     else
       [ ];
 in
-libPaths ++ ilandArchive ++ clientArchives ++ glesLink
+libPaths ++ ilandArchive ++ ilandWaylandEglArchive ++ clientArchives ++ glesLink

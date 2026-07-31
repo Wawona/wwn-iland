@@ -8,6 +8,9 @@
 typedef struct ILandIOSurface *IOSurfaceRef;
 
 IOSurfaceRef ILandIOSurfaceCreate(uint32_t width, uint32_t height, uint32_t bpe);
+/* In-process lookup by the id packed into the dmabuf modifier (bit 63 set).
+ * Retains; caller must ILandIOSurfaceRelease. NULL if unknown/freed. */
+IOSurfaceRef ILandIOSurfaceLookup(uint32_t id);
 void ILandIOSurfaceRetain(IOSurfaceRef surf);
 void ILandIOSurfaceRelease(IOSurfaceRef surf);
 uint32_t ILandIOSurfaceGetID(IOSurfaceRef surf);
@@ -28,7 +31,19 @@ void ILandIOSurfaceUnlock(IOSurfaceRef surf);
 #define IOSurfaceGetBaseAddress ILandIOSurfaceGetBaseAddress
 #define IOSurfaceLock(s, ...) ILandIOSurfaceLock(s)
 #define IOSurfaceUnlock(s, ...) ILandIOSurfaceUnlock(s)
+#define IOSurfaceLookup ILandIOSurfaceLookup
 #define CFRetain ILandIOSurfaceRetain
 #define CFRelease ILandIOSurfaceRelease
+/* Apple-only IOSurface metadata; no-op on Android AHB. */
+#define IOSurfaceSetValue(s, k, v) ((void)(s), (void)(k), (void)(v))
+#ifndef kIOReturnSuccess
+#define kIOReturnSuccess 0
+#endif
+#ifndef CFSTR
+#define CFSTR(x) ((const void *)(x))
+#endif
+#ifndef kCFBooleanTrue
+#define kCFBooleanTrue ((const void *)1)
+#endif
 
 #endif

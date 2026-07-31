@@ -16,7 +16,10 @@
 
 let
   angle = buildModule.buildForAndroid "angle" { };
+  libwayland = buildModule.buildForAndroid "libwayland" { };
   androidDir = ./android;
+  waylandScanner = pkgs.wayland-scanner;
+  waylandProtocols = pkgs.wayland-protocols;
 in
 pkgs.stdenv.mkDerivation {
   pname = "iland-userland";
@@ -27,7 +30,7 @@ pkgs.stdenv.mkDerivation {
   dontConfigure = true;
   dontFixup = true;
 
-  nativeBuildInputs = [ pkgs.python3 ];
+  nativeBuildInputs = [ pkgs.python3 waylandScanner ];
 
   postPatch = ''
     cp -f ${androidDir}/DisplaySurface.h shims/drm/displaysurface/include/DisplaySurface.h
@@ -35,6 +38,15 @@ pkgs.stdenv.mkDerivation {
     cp -f ${androidDir}/drm.h shims/drm/drm/include/drm.h
     cp -f ${androidDir}/gbm_priv.h shims/gbm/include/gbm_priv.h
     cp -f ${androidDir}/iosurface_compat.h shims/include/iosurface_compat.h
+
+    # Wayland-EGL winsys: Apple IOSurface headers → Android AHB compat.
+    sed -i 's|#include <IOSurface/IOSurfaceRef.h>|#include "iosurface_compat.h"|' \
+      shims/egl/include/iland_wl_winsys.h \
+      shims/egl/include/iland_wl_ops.h \
+      shims/egl/src/egl_wayland.c
+    # CFSTR / CoreFoundation only used for WWNBottomUp; iosurface_compat no-ops
+    # IOSurfaceSetValue. Strip any accidental CF include if added later.
+    sed -i '/#include <CoreFoundation/d' shims/egl/src/egl_wayland.c || true
 
     # Drop macOS WindowServer plist probe; keep preferred-mode + default sizes.
     python3 - <<'PY'
@@ -111,6 +123,10 @@ PY
     CC="${androidToolchain.androidCC}"
     AR="${androidToolchain.androidAR}"
 
+    DMABUF_XML="${waylandProtocols}/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml"
+    wayland-scanner client-header "$DMABUF_XML" linux-dmabuf-v1-client-protocol.h
+    wayland-scanner private-code  "$DMABUF_XML" linux-dmabuf-v1-protocol.c
+
     INCLUDES="\
       -Ishims/include \
       -I${androidDir} \
@@ -118,7 +134,10 @@ PY
       -Ishims/drm/drm/include \
       -Ishims/gbm/include \
       -Ishims/egl/include \
+      -Ishims/wayland-egl/include \
       -Ishims/udev/include \
+      -I${libwayland}/include \
+      -I${libwayland}/include/wayland \
       -I${angle}/include \
       -I${angle}/include/EGL \
       -I${angle}/include/GLES2"
@@ -143,6 +162,28 @@ PY
 
     "$AR" rcs libiland_userland.a $OBJS
 
+    # Wayland-EGL winsys (AHB id in dmabuf modifier — same #86 convention).
+    WL_OBJS=""
+    for src in \
+      shims/wayland-egl/src/wayland_egl.c \
+      shims/egl/src/egl_wayland.c \
+      linux-dmabuf-v1-protocol.c; do
+      obj="wl_$(basename "$src").o"
+      echo "CC $src"
+      "$CC" -c "$src" $COMMON_FLAGS -o "$obj"
+      WL_OBJS="$WL_OBJS $obj"
+    done
+    "$AR" rcs libiland_wayland_egl.a $WL_OBJS
+
+    # Vulkan Wayland WSI (optional; ICD-neutral present_pixels path).
+    if [ -f shims/vulkan-wayland/src/vk_wayland_wsi.c ]; then
+      VK_WL_CFLAGS="$COMMON_FLAGS -Ishims/vulkan-wayland/include -I${pkgs.vulkan-headers}/include"
+      echo "CC shims/vulkan-wayland/src/vk_wayland_wsi.c"
+      "$CC" -c shims/vulkan-wayland/src/vk_wayland_wsi.c $VK_WL_CFLAGS \
+        -o vk_wayland_wsi.o
+      "$AR" rcs libiland_wayland_vulkan.a vk_wayland_wsi.o
+    fi
+
     runHook postBuild
   '';
 
@@ -150,9 +191,18 @@ PY
     mkdir -p $out/lib $out/include/EGL $out/include/GLES2 $out/include/GLES3 $out/include/KHR $out/nix-support
 
     cp libiland_userland.a $out/lib/
+    cp libiland_wayland_egl.a $out/lib/
+    if [ -f libiland_wayland_vulkan.a ]; then
+      cp libiland_wayland_vulkan.a $out/lib/
+    fi
 
     cp shims/gbm/include/gbm.h                       $out/include/
     cp shims/egl/include/egl_shim.h                  $out/include/
+    cp shims/egl/include/iland_wl_winsys.h           $out/include/
+    cp shims/wayland-egl/include/iland_wayland_egl.h $out/include/
+    if [ -f shims/vulkan-wayland/include/iland_vk_wayland.h ]; then
+      cp shims/vulkan-wayland/include/iland_vk_wayland.h $out/include/
+    fi
     cp shims/drm/displaysurface/include/DisplaySurface.h $out/include/
     cp shims/include/drm_fourcc.h                    $out/include/
     cp shims/include/xf86drm.h                       $out/include/

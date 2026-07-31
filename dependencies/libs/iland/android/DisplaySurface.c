@@ -36,6 +36,12 @@ DisplaySurfaceInfo DisplaySurface_create(uint32_t width, uint32_t height, WSPixe
     return info;
 }
 
+DisplaySurfaceInfo DisplaySurface_create_global(uint32_t width, uint32_t height,
+                                                WSPixelFormat fmt)
+{
+    return DisplaySurface_create(width, height, fmt);
+}
+
 void DisplaySurface_destroy(DisplaySurfaceInfo *info)
 {
     if (!info)

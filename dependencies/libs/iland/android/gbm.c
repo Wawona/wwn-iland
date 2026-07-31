@@ -4,8 +4,10 @@
 #include "drm_fourcc.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 extern void drm_register_gbm_buffer(uint32_t handle, void *surface,
                                     uint32_t format);
@@ -269,17 +271,19 @@ void gbm_bo_destroy(struct gbm_bo *bo)
 
 int gbm_bo_get_fd(struct gbm_bo *bo)
 {
+    /* Placeholder fd — compositor keys off the IOSurface/AHB id in the
+     * modifier, same as Apple. Never a real dma-buf. */
     (void)bo;
-    errno = ENOSYS;
-    return -1;
+    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        errno = ENOSYS;
+    return fd;
 }
 
 int gbm_bo_get_fd_for_plane(struct gbm_bo *bo, int plane)
 {
-    (void)bo;
     (void)plane;
-    errno = ENOSYS;
-    return -1;
+    return gbm_bo_get_fd(bo);
 }
 
 int gbm_bo_get_plane_count(struct gbm_bo *bo)
@@ -334,12 +338,40 @@ int gbm_bo_write(struct gbm_bo *bo, const void *buf, size_t count)
 
 struct gbm_bo *gbm_bo_import(struct gbm_device *gbm, uint32_t type, void *buffer, uint32_t usage)
 {
-    (void)gbm;
-    (void)type;
-    (void)buffer;
     (void)usage;
-    errno = ENOSYS;
-    return NULL;
+    if (!gbm || type != GBM_BO_IMPORT_FD_MODIFIER || !buffer) {
+        errno = EINVAL;
+        return NULL;
+    }
+    struct gbm_import_fd_modifier_data *data = buffer;
+    if (data->num_fds != 1 ||
+        (data->modifier & 0x8000000000000000ULL) == 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+    uint32_t surface_id =
+        (uint32_t)(data->modifier & 0x7fffffffffffffffULL);
+    IOSurfaceRef surface = ILandIOSurfaceLookup(surface_id);
+    if (!surface) {
+        errno = ENOENT;
+        return NULL;
+    }
+
+    struct gbm_bo *bo = calloc(1, sizeof(*bo));
+    if (!bo) {
+        ILandIOSurfaceRelease(surface);
+        errno = ENOMEM;
+        return NULL;
+    }
+    bo->device = gbm;
+    bo->width = data->width;
+    bo->height = data->height;
+    bo->stride = data->strides[0] > 0 ? (uint32_t)data->strides[0]
+                                      : (uint32_t)IOSurfaceGetBytesPerRow(surface);
+    bo->format = data->format;
+    bo->surface = surface;
+    drm_register_gbm_buffer(surface_id, (void *)surface, data->format);
+    return bo;
 }
 
 struct gbm_surface *gbm_surface_create_with_modifiers(

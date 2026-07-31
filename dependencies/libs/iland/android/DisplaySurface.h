@@ -28,6 +28,9 @@ typedef struct DisplaySurfaceInfo {
 } DisplaySurfaceInfo;
 
 DisplaySurfaceInfo DisplaySurface_create(uint32_t width, uint32_t height, WSPixelFormat fmt);
+/* Same as create on Android: AHB ids are process-local via ILandIOSurfaceLookup. */
+DisplaySurfaceInfo DisplaySurface_create_global(uint32_t width, uint32_t height,
+                                                WSPixelFormat fmt);
 void DisplaySurface_destroy(DisplaySurfaceInfo *info);
 
 #endif
