@@ -168,22 +168,27 @@ AHardwareBuffer *ILandIOSurfaceGetHardwareBuffer(IOSurfaceRef surf)
     return surf ? surf->hardware_buffer : NULL;
 }
 
-void ILandIOSurfaceLock(IOSurfaceRef surf)
+int ILandIOSurfaceLock(IOSurfaceRef surf)
 {
-    if (!surf || surf->mapped_data)
-        return;
+    if (!surf)
+        return -1;
+    if (surf->mapped_data)
+        return 0;
     void *address = NULL;
     if (AHardwareBuffer_lock(surf->hardware_buffer,
                              AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
                                  AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,
-                             -1, NULL, &address) == 0)
-        surf->mapped_data = address;
+                             -1, NULL, &address) != 0)
+        return -1;
+    surf->mapped_data = address;
+    return 0;
 }
 
-void ILandIOSurfaceUnlock(IOSurfaceRef surf)
+int ILandIOSurfaceUnlock(IOSurfaceRef surf)
 {
     if (!surf || !surf->mapped_data)
-        return;
+        return 0;
     AHardwareBuffer_unlock(surf->hardware_buffer, NULL);
     surf->mapped_data = NULL;
+    return 0;
 }

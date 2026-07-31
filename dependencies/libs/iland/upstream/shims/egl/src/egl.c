@@ -39,9 +39,10 @@
 #include <IOSurface/IOSurfaceRef.h>
 #include <Accelerate/Accelerate.h>
 
-/* Wayland-EGL winsys: IOSurface-backed wl_buffers posted via linux-dmabuf.
- * Apple-only for now — the Android equivalent posts AHardwareBuffer instead. */
-#if defined(__APPLE__) && !defined(ILAND_NO_WL_WINSYS)
+/* Wayland-EGL winsys: IOSurface (Apple) / AHardwareBuffer (Android) posted
+ * via linux-dmabuf. Depth-blit helpers below also serve the GBM zerocopy path,
+ * so this gate must be on whenever those call sites compile — not Apple-only. */
+#if (defined(__APPLE__) || defined(__ANDROID__)) && !defined(ILAND_NO_WL_WINSYS)
 #define ILAND_HAVE_WL_WINSYS 1
 #include "iland_wayland_egl.h"
 #include "iland_wl_winsys.h"
@@ -198,11 +199,23 @@ static void (*g_glDeleteFramebuffers)(int, const unsigned int *) = NULL;
 #ifndef EGL_TEXTURE_INTERNAL_FORMAT_ANGLE
 #define EGL_TEXTURE_INTERNAL_FORMAT_ANGLE   0x345D
 #endif
+#ifndef EGL_BIND_TO_TEXTURE_TARGET_ANGLE
+#define EGL_BIND_TO_TEXTURE_TARGET_ANGLE    0x348D
+#endif
+#ifndef EGL_TEXTURE_2D
+#define EGL_TEXTURE_2D                      0x305F
+#endif
 #ifndef GL_BGRA_EXT
 #define GL_BGRA_EXT                         0x80E1
 #endif
 #ifndef GL_UNSIGNED_BYTE
 #define GL_UNSIGNED_BYTE                    0x1401
+#endif
+#ifndef GL_TEXTURE_2D
+#define GL_TEXTURE_2D                       0x0DE1
+#endif
+#ifndef GL_TEXTURE_BINDING_2D
+#define GL_TEXTURE_BINDING_2D               0x8069
 #endif
 
 /* Set once at first surface creation from $ILAND_EGL_ZEROCOPY. */
@@ -717,6 +730,40 @@ EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx)
     return real_eglDestroyContext(sd->angle_display, ctx);
 }
 
+/* ANGLE's rectangle texture target (CGL / older macOS ANGLE). Metal ANGLE
+ * reports EGL_TEXTURE_2D via EGL_BIND_TO_TEXTURE_TARGET_ANGLE instead. */
+#define WWN_GL_TEXTURE_RECTANGLE            0x84F5
+#define WWN_GL_TEXTURE_BINDING_RECTANGLE    0x84F6
+
+/* EGL_ANGLE_iosurface_client_buffer: TEXTURE_TARGET must equal the config's
+ * EGL_BIND_TO_TEXTURE_TARGET_ANGLE. Metal returns EGL_TEXTURE_2D; hardcoding
+ * RECTANGLE yields EGL_BAD_ATTRIBUTE and eglCreateWindowSurface fails after
+ * the compositor has already mapped the xdg toplevel (a flash of a host
+ * window, then the client exits). */
+static EGLint zc_egl_texture_target(EGLShimDisplay *sd, EGLConfig config)
+{
+    EGLint target = 0;
+    if (real_eglGetConfigAttrib &&
+        real_eglGetConfigAttrib(sd->angle_display, config,
+                                EGL_BIND_TO_TEXTURE_TARGET_ANGLE, &target) &&
+        (target == EGL_TEXTURE_2D || target == EGL_TEXTURE_RECTANGLE_ANGLE))
+        return target;
+    return EGL_TEXTURE_RECTANGLE_ANGLE;
+}
+
+static unsigned int zc_gl_texture_target(EGLint egl_target)
+{
+    return (egl_target == EGL_TEXTURE_2D) ? (unsigned int)GL_TEXTURE_2D
+                                          : WWN_GL_TEXTURE_RECTANGLE;
+}
+
+static unsigned int zc_gl_texture_binding(unsigned int gl_target)
+{
+    return (gl_target == (unsigned int)GL_TEXTURE_2D)
+               ? (unsigned int)GL_TEXTURE_BINDING_2D
+               : WWN_GL_TEXTURE_BINDING_RECTANGLE;
+}
+
 /* Zero-copy: get/create the ANGLE IOSurface-client-buffer pbuffer for buffer
  * slot `idx`. ANGLE renders the default framebuffer straight into the
  * IOSurface-backed Metal texture — no glReadPixels, no CPU channel swap.
@@ -732,11 +779,15 @@ static EGLSurface zc_pbuffer_for_iosurface(EGLShimDisplay *sd,
 
     if (!io || !real_eglCreatePbufferFromClientBuffer) return EGL_NO_SURFACE;
 
+    EGLint egl_tex_target = zc_egl_texture_target(sd, ss->config);
+    if (!ss->blit_gl_target)
+        ss->blit_gl_target = zc_gl_texture_target(egl_tex_target);
+
     const EGLint attribs[] = {
         EGL_WIDTH,                          (EGLint)ss->width,
         EGL_HEIGHT,                         (EGLint)ss->height,
         EGL_IOSURFACE_PLANE_ANGLE,          0,
-        EGL_TEXTURE_TARGET,                 EGL_TEXTURE_RECTANGLE_ANGLE,
+        EGL_TEXTURE_TARGET,                 egl_tex_target,
         EGL_TEXTURE_INTERNAL_FORMAT_ANGLE,  GL_BGRA_EXT,
         EGL_TEXTURE_FORMAT,                 EGL_TEXTURE_RGBA,
         EGL_TEXTURE_TYPE_ANGLE,             GL_UNSIGNED_BYTE,
@@ -752,6 +803,17 @@ static EGLSurface zc_pbuffer_for_iosurface(EGLShimDisplay *sd,
     EGLSurface s = real_eglCreatePbufferFromClientBuffer(
         sd->angle_display, EGL_IOSURFACE_ANGLE,
         (EGLClientBuffer)io, ss->config, attribs);
+    if (s == EGL_NO_SURFACE) {
+        static int warned = 0;
+        if (!warned) {
+            warned = 1;
+            fprintf(stderr,
+                    "iland: eglCreatePbufferFromClientBuffer(IOSurface) failed "
+                    "(0x%04x) with EGL_TEXTURE_TARGET=0x%x\n",
+                    real_eglGetError ? real_eglGetError() : 0,
+                    (unsigned)egl_tex_target);
+        }
+    }
     ss->iosurf_pbuffers[idx] = s;
     return s;
 }
@@ -772,9 +834,6 @@ static EGLSurface zc_pbuffer_for_bo(EGLShimDisplay *sd, EGLShimSurface *ss,
 #define WWN_GL_NEAREST                   0x2600
 #define WWN_GL_COLOR_ATTACHMENT0         0x8CE0
 #define WWN_GL_FRAMEBUFFER_COMPLETE      0x8CD5
-/* ANGLE's rectangle texture target, the one an IOSurface pbuffer binds to. */
-#define WWN_GL_TEXTURE_RECTANGLE            0x84F5
-#define WWN_GL_TEXTURE_BINDING_RECTANGLE    0x84F6
 
 /* An ANGLE pbuffer wrapping an IOSurface has the IOSurface as its colour
  * attachment and nothing else: no depth, no stencil, whatever the config asked
@@ -891,20 +950,26 @@ static void zc_blit_to_slot(EGLShimDisplay *sd, EGLShimSurface *ss,
         !g_glFramebufferTexture2D)
         return;
 
+    if (!ss->blit_gl_target)
+        ss->blit_gl_target = WWN_GL_TEXTURE_RECTANGLE;
+
     if (!ss->blit_tex) {
         g_glGenTextures(1, &ss->blit_tex);
         g_glGenFramebuffers(1, &ss->blit_fbo);
         if (!ss->blit_tex || !ss->blit_fbo) return;
     }
 
+    const unsigned int gl_target = ss->blit_gl_target;
+    const unsigned int gl_binding = zc_gl_texture_binding(gl_target);
+
     int prev_draw = 0, prev_read = 0, prev_tex = 0;
     g_glGetIntegerv(WWN_GL_DRAW_FRAMEBUFFER_BINDING, &prev_draw);
     g_glGetIntegerv(WWN_GL_READ_FRAMEBUFFER_BINDING, &prev_read);
-    g_glGetIntegerv(WWN_GL_TEXTURE_BINDING_RECTANGLE, &prev_tex);
+    g_glGetIntegerv(gl_binding, &prev_tex);
 
-    g_glBindTexture(WWN_GL_TEXTURE_RECTANGLE, ss->blit_tex);
+    g_glBindTexture(gl_target, ss->blit_tex);
     if (!real_eglBindTexImage(sd->angle_display, dst_pb, EGL_BACK_BUFFER)) {
-        g_glBindTexture(WWN_GL_TEXTURE_RECTANGLE, (unsigned int)prev_tex);
+        g_glBindTexture(gl_target, (unsigned int)prev_tex);
         static int warned = 0;
         if (!warned) {
             warned = 1;
@@ -917,7 +982,7 @@ static void zc_blit_to_slot(EGLShimDisplay *sd, EGLShimSurface *ss,
 
     g_glBindFramebuffer(WWN_GL_DRAW_FRAMEBUFFER, ss->blit_fbo);
     g_glFramebufferTexture2D(WWN_GL_DRAW_FRAMEBUFFER, WWN_GL_COLOR_ATTACHMENT0,
-                             WWN_GL_TEXTURE_RECTANGLE, ss->blit_tex, 0);
+                             gl_target, ss->blit_tex, 0);
     g_glBindFramebuffer(WWN_GL_READ_FRAMEBUFFER, 0);
 
     if (g_glCheckFramebufferStatus) {
@@ -939,12 +1004,12 @@ static void zc_blit_to_slot(EGLShimDisplay *sd, EGLShimSurface *ss,
 
     /* Detach before release so the texture does not outlive the binding. */
     g_glFramebufferTexture2D(WWN_GL_DRAW_FRAMEBUFFER, WWN_GL_COLOR_ATTACHMENT0,
-                             WWN_GL_TEXTURE_RECTANGLE, 0, 0);
+                             gl_target, 0, 0);
     g_glBindFramebuffer(WWN_GL_DRAW_FRAMEBUFFER, (unsigned int)prev_draw);
     g_glBindFramebuffer(WWN_GL_READ_FRAMEBUFFER, (unsigned int)prev_read);
 
     real_eglReleaseTexImage(sd->angle_display, dst_pb, EGL_BACK_BUFFER);
-    g_glBindTexture(WWN_GL_TEXTURE_RECTANGLE, (unsigned int)prev_tex);
+    g_glBindTexture(gl_target, (unsigned int)prev_tex);
 }
 
 /* Only safe with the client's context still current, which holds for the

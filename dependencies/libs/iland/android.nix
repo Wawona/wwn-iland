@@ -142,7 +142,8 @@ PY
       -I${angle}/include/EGL \
       -I${angle}/include/GLES2"
 
-    COMMON_FLAGS="-fPIC -O2 -std=c11 $INCLUDES -Wno-int-conversion -D_GNU_SOURCE"
+    # -I. so generated linux-dmabuf-v1-client-protocol.h is visible to egl_wayland.c
+    COMMON_FLAGS="-fPIC -O2 -std=c11 -I. $INCLUDES -Wno-int-conversion -D_GNU_SOURCE"
 
     OBJS=""
     for src in \

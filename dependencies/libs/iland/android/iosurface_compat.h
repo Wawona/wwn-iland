@@ -20,8 +20,9 @@ size_t ILandIOSurfaceGetBytesPerRow(IOSurfaceRef surf);
 size_t ILandIOSurfaceGetAllocSize(IOSurfaceRef surf);
 void *ILandIOSurfaceGetBaseAddress(IOSurfaceRef surf);
 AHardwareBuffer *ILandIOSurfaceGetHardwareBuffer(IOSurfaceRef surf);
-void ILandIOSurfaceLock(IOSurfaceRef surf);
-void ILandIOSurfaceUnlock(IOSurfaceRef surf);
+/* Return 0 on success so Apple-shaped `!= kIOReturnSuccess` checks compile. */
+int ILandIOSurfaceLock(IOSurfaceRef surf);
+int ILandIOSurfaceUnlock(IOSurfaceRef surf);
 
 #define IOSurfaceGetID ILandIOSurfaceGetID
 #define IOSurfaceGetWidth ILandIOSurfaceGetWidth
