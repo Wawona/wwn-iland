@@ -41,8 +41,8 @@
 #include <Accelerate/Accelerate.h>
 
 /* Wayland-EGL winsys: IOSurface (Apple) / AHardwareBuffer (Android) posted
- * via linux-dmabuf. Depth-blit helpers below also serve the GBM zerocopy path,
- * so this gate must be on whenever those call sites compile — not Apple-only. */
+ * via linux-dmabuf. Depth-blit (zc_*) helpers are compiled unconditionally so
+ * the GBM zerocopy path still works under ILAND_NO_WL_WINSYS (Mode B). */
 #if (defined(__APPLE__) || defined(__ANDROID__)) && !defined(ILAND_NO_WL_WINSYS)
 #define ILAND_HAVE_WL_WINSYS 1
 #include "iland_wayland_egl.h"
@@ -915,8 +915,9 @@ static EGLSurface zc_pbuffer_for_bo(EGLShimDisplay *sd, EGLShimSurface *ss,
     return zc_pbuffer_for_iosurface(sd, ss, idx, gbm_bo_get_iosurface(bo));
 }
 
-#ifdef ILAND_HAVE_WL_WINSYS
-/* GLES3 enums; GLES2/gl2.h predates them. */
+/* GLES3 enums; GLES2/gl2.h predates them. Depth-blit helpers below serve both
+ * the Wayland-EGL winsys and the GBM zerocopy path — keep them outside
+ * ILAND_HAVE_WL_WINSYS so Mode B (ILAND_NO_WL_WINSYS) still compiles. */
 #define WWN_GL_READ_FRAMEBUFFER          0x8CA8
 #define WWN_GL_DRAW_FRAMEBUFFER          0x8CA9
 #define WWN_GL_READ_FRAMEBUFFER_BINDING  0x8CAA
@@ -1134,6 +1135,7 @@ static void zc_drop_pbuffers(EGLShimDisplay *sd, EGLShimSurface *ss)
     }
 }
 
+#ifdef ILAND_HAVE_WL_WINSYS
 /* Make swapchain slot `slot` the one the next swap presents. With the render
  * pbuffer in play the drawing target never changes, so this is bookkeeping;
  * without it the slot's IOSurface *is* the default framebuffer and the context

@@ -57,9 +57,9 @@ pkgs.stdenv.mkDerivation {
     substituteInPlace shims/egl/CMakeLists.txt \
       --replace '/opt/local/include' '${angle}/include'
 
-    # Mode B presents via Mach/framebufferd, not wl_egl_window. egl.c's
-    # Wayland-EGL winsys needs shims/wayland-egl/include; skip it here so the
-    # CMake egl-shim target does not fail on iland_wayland_egl.h.
+    # Mode B presents via Mach/framebufferd, not wl_egl_window. Skip the
+    # Wayland-EGL winsys (needs shims/wayland-egl/include). GBM zerocopy still
+    # compiles: depth-blit helpers in egl.c are no longer gated on WL_WINSYS.
     substituteInPlace shims/egl/CMakeLists.txt \
       --replace 'add_library(egl-shim STATIC src/egl.c)' \
                 'add_library(egl-shim STATIC src/egl.c)
