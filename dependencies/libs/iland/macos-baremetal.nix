@@ -57,6 +57,14 @@ pkgs.stdenv.mkDerivation {
     substituteInPlace shims/egl/CMakeLists.txt \
       --replace '/opt/local/include' '${angle}/include'
 
+    # Mode B presents via Mach/framebufferd, not wl_egl_window. egl.c's
+    # Wayland-EGL winsys needs shims/wayland-egl/include; skip it here so the
+    # CMake egl-shim target does not fail on iland_wayland_egl.h.
+    substituteInPlace shims/egl/CMakeLists.txt \
+      --replace 'add_library(egl-shim STATIC src/egl.c)' \
+                'add_library(egl-shim STATIC src/egl.c)
+target_compile_definitions(egl-shim PRIVATE ILAND_NO_WL_WINSYS=1)'
+
     # inputd CMake hardcodes /opt/local/include — drop it (IOKit headers are in SDK).
     substituteInPlace shims/libinput/input-daemon/CMakeLists.txt \
       --replace '/opt/local/include' '${angle}/include'
