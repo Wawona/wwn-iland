@@ -30,6 +30,7 @@ SYMS=(
   # The shim defines these too (EGL_EXT_platform_base, which it advertises), so
   # they must move aside even though the shim never calls ANGLE's versions.
   eglCreatePlatformWindowSurface eglCreatePlatformWindowSurfaceEXT
+  eglGetPlatformDisplay eglGetPlatformDisplayEXT
 )
 
 args=()
