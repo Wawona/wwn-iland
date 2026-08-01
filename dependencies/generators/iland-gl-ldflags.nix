@@ -14,6 +14,7 @@ let
     deps.kmscube or deps."iland-gl-clients" or deps.iland-gl-clients or null;
   openglCube = deps."opengl-cube" or null;
   vkcube = deps.vkcube or null;
+  gbmEs2Demo = deps."gbm-es2-demo" or null;
   angleLinkKind =
     if angle == null then
       "none"
@@ -30,6 +31,7 @@ let
     (libPath "iland-gl-clients")
     (libPath "opengl-cube")
     (libPath "vkcube")
+    (libPath "gbm-es2-demo")
   ];
   ilandArchive =
     if forceLoad && iland != null then
@@ -76,6 +78,11 @@ let
     entry = "vkcube_main";
     lib_ = "vkcube";
   };
+  gbmEs2DemoArchive = cubeArchive {
+    dep = gbmEs2Demo;
+    entry = "gbm_es2_demo_main";
+    lib_ = "gbm_es2_demo";
+  };
   angleFlags =
     if angle == null then
       [ ]
@@ -106,3 +113,4 @@ libPaths
 ++ kmscubeArchive
 ++ openglCubeArchive
 ++ vkcubeArchive
+++ gbmEs2DemoArchive

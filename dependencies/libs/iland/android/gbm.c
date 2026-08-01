@@ -57,6 +57,23 @@ void gbm_device_destroy(struct gbm_device *gbm)
     free(gbm);
 }
 
+const char *gbm_device_get_backend_name(struct gbm_device *gbm)
+{
+    return gbm ? "iland-ahb" : NULL;
+}
+
+int gbm_device_is_format_supported(struct gbm_device *gbm,
+                                   uint32_t format, uint32_t usage)
+{
+    if (!gbm)
+        return 0;
+    const uint32_t supported_usage =
+        GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING | GBM_BO_USE_WRITE |
+        GBM_BO_USE_LINEAR | GBM_BO_USE_CURSOR_64X64;
+    return iosurface_format_for_drm(format) != 0 &&
+           (usage & ~supported_usage) == 0;
+}
+
 struct gbm_surface *gbm_surface_create(
     struct gbm_device *gbm,
     uint32_t width,
@@ -263,6 +280,8 @@ void gbm_bo_destroy(struct gbm_bo *bo)
     if (!bo)
         return;
     if (bo->surface) {
+        if (bo->map_count > 0)
+            IOSurfaceUnlock(bo->surface, 0, NULL);
         drm_unregister_gbm_buffer((uint32_t)IOSurfaceGetID(bo->surface));
         ILandIOSurfaceRelease(bo->surface);
     }
@@ -273,7 +292,10 @@ int gbm_bo_get_fd(struct gbm_bo *bo)
 {
     /* Placeholder fd — compositor keys off the IOSurface/AHB id in the
      * modifier, same as Apple. Never a real dma-buf. */
-    (void)bo;
+    if (!bo || !bo->surface) {
+        errno = EINVAL;
+        return -1;
+    }
     int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         errno = ENOSYS;
@@ -282,7 +304,10 @@ int gbm_bo_get_fd(struct gbm_bo *bo)
 
 int gbm_bo_get_fd_for_plane(struct gbm_bo *bo, int plane)
 {
-    (void)plane;
+    if (plane != 0) {
+        errno = EINVAL;
+        return -1;
+    }
     return gbm_bo_get_fd(bo);
 }
 
@@ -334,6 +359,50 @@ int gbm_bo_write(struct gbm_bo *bo, const void *buf, size_t count)
     memcpy(base, buf, count);
     IOSurfaceUnlock(bo->surface, 0, NULL);
     return 0;
+}
+
+static uint32_t gbm_bo_bpp(struct gbm_bo *bo)
+{
+    /* 8888 and 2101010 are both 4 bytes/pixel (Apple map math). */
+    (void)bo;
+    return 4;
+}
+
+void *gbm_bo_map(struct gbm_bo *bo,
+                 uint32_t x, uint32_t y,
+                 uint32_t width, uint32_t height,
+                 uint32_t flags, uint32_t *stride,
+                 void **map_data)
+{
+    (void)flags;
+    if (!bo || !bo->surface || x > bo->width || y > bo->height ||
+        width > bo->width - x || height > bo->height - y) {
+        errno = EINVAL;
+        return NULL;
+    }
+    if (bo->map_count++ == 0)
+        IOSurfaceLock(bo->surface, 0, NULL);
+    void *base = IOSurfaceGetBaseAddress(bo->surface);
+    if (!base) {
+        if (--bo->map_count == 0)
+            IOSurfaceUnlock(bo->surface, 0, NULL);
+        errno = EIO;
+        return NULL;
+    }
+    if (stride)
+        *stride = bo->stride;
+    if (map_data)
+        *map_data = bo;
+    return (uint8_t *)base + (size_t)y * bo->stride +
+           (size_t)x * gbm_bo_bpp(bo);
+}
+
+void gbm_bo_unmap(struct gbm_bo *bo, void *map_data)
+{
+    if (!bo || map_data != bo || bo->map_count == 0)
+        return;
+    if (--bo->map_count == 0)
+        IOSurfaceUnlock(bo->surface, 0, NULL);
 }
 
 struct gbm_bo *gbm_bo_import(struct gbm_device *gbm, uint32_t type, void *buffer, uint32_t usage)

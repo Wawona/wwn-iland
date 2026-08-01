@@ -5,9 +5,18 @@
 #include <stdint.h>
 #include <android/hardware_buffer.h>
 
+/* NDK AHardwareBuffer.h omits BGRA; HAL_PIXEL_FORMAT_BGRA_8888 == 5 matches
+ * Apple GBM's BGRA8888 channel order for XRGB/ARGB8888. */
+#ifndef AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
+#define AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM 5u
+#endif
+
 typedef struct ILandIOSurface *IOSurfaceRef;
 
-IOSurfaceRef ILandIOSurfaceCreate(uint32_t width, uint32_t height, uint32_t bpe);
+/* `ahb_format` is an AHARDWAREBUFFER_FORMAT_* value. Rejects unknown formats
+ * (no silent RGBA8 substitute). `bpe` must match the format (4 for 8888 / 2101010). */
+IOSurfaceRef ILandIOSurfaceCreate(uint32_t width, uint32_t height, uint32_t bpe,
+                                  uint32_t ahb_format);
 /* In-process lookup by the id packed into the dmabuf modifier (bit 63 set).
  * Retains; caller must ILandIOSurfaceRelease. NULL if unknown/freed. */
 IOSurfaceRef ILandIOSurfaceLookup(uint32_t id);

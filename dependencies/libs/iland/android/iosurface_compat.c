@@ -49,9 +49,23 @@ static void registry_remove(IOSurfaceRef surf)
     }
 }
 
-IOSurfaceRef ILandIOSurfaceCreate(uint32_t width, uint32_t height, uint32_t bpe)
+static int ahb_format_bpe_ok(uint32_t ahb_format, uint32_t bpe)
 {
-    if (width == 0 || height == 0 || bpe == 0)
+    switch (ahb_format) {
+    case AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM:
+    case AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM:
+    case AHARDWAREBUFFER_FORMAT_R10G10B10A2_UNORM:
+        return bpe == 4;
+    default:
+        return 0;
+    }
+}
+
+IOSurfaceRef ILandIOSurfaceCreate(uint32_t width, uint32_t height, uint32_t bpe,
+                                  uint32_t ahb_format)
+{
+    if (width == 0 || height == 0 || bpe == 0 ||
+        !ahb_format_bpe_ok(ahb_format, bpe))
         return NULL;
 
     IOSurfaceRef surf = calloc(1, sizeof(*surf));
@@ -65,7 +79,7 @@ IOSurfaceRef ILandIOSurfaceCreate(uint32_t width, uint32_t height, uint32_t bpe)
         .width = width,
         .height = height,
         .layers = 1,
-        .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+        .format = ahb_format,
         .usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
                  AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
                  AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN |
@@ -74,8 +88,7 @@ IOSurfaceRef ILandIOSurfaceCreate(uint32_t width, uint32_t height, uint32_t bpe)
         .rfu0 = 0,
         .rfu1 = 0,
     };
-    if (bpe != 4 ||
-        AHardwareBuffer_allocate(&desc, &surf->hardware_buffer) != 0 ||
+    if (AHardwareBuffer_allocate(&desc, &surf->hardware_buffer) != 0 ||
         !surf->hardware_buffer) {
         free(surf);
         return NULL;

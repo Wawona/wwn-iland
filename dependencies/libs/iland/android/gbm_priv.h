@@ -18,6 +18,7 @@ struct gbm_bo {
     uint32_t height;
     uint32_t stride;
     uint32_t format;
+    uint32_t map_count;
     void *user_data;
     void (*destroy_user_data)(struct gbm_bo *, void *);
 };

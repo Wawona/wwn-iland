@@ -33,6 +33,7 @@
 #include <egl_shim.h>
 #include <gbm_priv.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -252,7 +253,35 @@ static inline uint32_t rgba_to_bgra(uint32_t rgba)
 }
 
 /* Permute map: RGBA → BGRA (swap byte 0 and byte 2) */
+#if !defined(__ANDROID__)
 static const uint8_t kRGBAToBGRAMap[4] = { 2, 1, 0, 3 };
+#endif
+
+/* RGBA→BGRA after glReadPixels. Accelerate on Apple; scalar on Android
+ * (no Accelerate.framework in the NDK). */
+static void swap_rgba_to_bgra(uint8_t *dst8, uint32_t w, uint32_t h,
+                              size_t dst_pitch_bytes)
+{
+#if defined(__ANDROID__)
+    for (uint32_t y = 0; y < h; y++) {
+        uint8_t *row = dst8 + (size_t)y * dst_pitch_bytes;
+        for (uint32_t x = 0; x < w; x++) {
+            uint8_t *px = row + (size_t)x * 4;
+            uint8_t r = px[0], b = px[2];
+            px[0] = b;
+            px[2] = r;
+        }
+    }
+#else
+    vImage_Buffer buf = {
+        .data     = dst8,
+        .width    = w,
+        .height   = h,
+        .rowBytes = dst_pitch_bytes,
+    };
+    vImagePermuteChannels_ARGB8888(&buf, &buf, kRGBAToBGRAMap, 0);
+#endif
+}
 
 static int graphics_policy_allows_angle(void)
 {
@@ -260,7 +289,18 @@ static int graphics_policy_allows_angle(void)
     const char *driver = getenv("WWN_OPENGL_DRIVER");
     if (disabled && disabled[0] == '1') return 0;
     if (!driver || !driver[0]) return 1;
+    if (strcmp(driver, "none") == 0) return 0;
+#if defined(__ANDROID__)
+    /* iland's EGL shim + in-process GL clients (kmscube, opengl-cube,
+     * simple-egl) resolve gl* against bundled libGLESv2_angle. Vendor
+     * META-EGL ("OpenGL Driver=system") cannot share that context and has
+     * no EGL_ANGLE_iosurface_client_buffer — always back the shim with
+     * ANGLE on Android. */
+    return strcmp(driver, "angle") == 0 || strcmp(driver, "system") == 0;
+#else
+    /* Apple / desktop GLES path is ANGLE only. */
     return strcmp(driver, "angle") == 0;
+#endif
 }
 
 #ifdef ILAND_ANGLE_STATIC
@@ -362,8 +402,30 @@ static int load_angle(void)
         if (g_angle_handle) break;
     }
 #elif defined(__ANDROID__)
-    /* System ANGLE/GLES from the NDK loader; no bundled Apple-style slice. */
-    g_angle_handle = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
+    /*
+     * Always map the shim onto bundled ANGLE — even when OpenGL Driver=system.
+     * libwawona NEEDED libGLESv2_angle; pairing it with META-EGL yields
+     * eglCreateWindowSurface / shader failures. Prefer an already-mapped
+     * image (RTLD_NOLOAD) so we share one ANGLE with System.loadLibrary.
+     */
+    {
+        static const char *angle_candidates[] = {
+            "libEGL_angle.so",
+            "libEGL.so",
+            NULL,
+        };
+        for (size_t i = 0; angle_candidates[i]; i++) {
+            g_angle_handle =
+                dlopen(angle_candidates[i], RTLD_NOW | RTLD_NOLOAD);
+            if (g_angle_handle) break;
+        }
+        if (!g_angle_handle) {
+            for (size_t i = 0; angle_candidates[i]; i++) {
+                g_angle_handle = open_angle_library(angle_candidates[i]);
+                if (g_angle_handle) break;
+            }
+        }
+    }
 #else
     /*
      * Prefer an ANGLE that the host process has already mapped. A macOS app
@@ -436,7 +498,25 @@ static void load_gles2(void)
         if (h) break;
     }
 #elif defined(__ANDROID__)
-    void *h = dlopen("libGLESv2.so", RTLD_NOW | RTLD_LOCAL);
+    void *h = NULL;
+    {
+        /* Match load_angle: always ANGLE GLESv2 on Android. */
+        static const char *angle_candidates[] = {
+            "libGLESv2_angle.so",
+            "libGLESv2.so",
+            NULL,
+        };
+        for (size_t i = 0; angle_candidates[i]; i++) {
+            h = dlopen(angle_candidates[i], RTLD_NOW | RTLD_NOLOAD);
+            if (h) break;
+        }
+        if (!h) {
+            for (size_t i = 0; angle_candidates[i]; i++) {
+                h = open_angle_library(angle_candidates[i]);
+                if (h) break;
+            }
+        }
+    }
 #else
     /* Same single-image rule as load_angle(). */
     static const char *candidates[] = {
@@ -1110,7 +1190,7 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
         if (!ws) return EGL_NO_SURFACE;
 
         ws->wayland = 1;
-        ws->zerocopy = 1;
+        ws->zerocopy = 0;
         ws->config = config;
         ws->wl_window = wlwin;
         ws->wl_swapchain = iland_wl_swapchain_create(sd->wl_winsys, wlwin);
@@ -1119,20 +1199,38 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
             return EGL_NO_SURFACE;
         }
         iland_wl_swapchain_get_size(ws->wl_swapchain, &ws->width, &ws->height);
+        ws->wl_slot = 0;
 
-        /* Bind slot 0 without a current context; eglMakeCurrent picks it up. */
-        IOSurfaceRef io = iland_wl_swapchain_iosurface(ws->wl_swapchain, 0);
-        EGLSurface pb = zc_pbuffer_for_iosurface(sd, ws, 0, io);
-        if (!pb) {
+        if (zerocopy_enabled()) {
+            /* Bind slot 0 without a current context; eglMakeCurrent picks it up. */
+            IOSurfaceRef io = iland_wl_swapchain_iosurface(ws->wl_swapchain, 0);
+            EGLSurface pb = zc_pbuffer_for_iosurface(sd, ws, 0, io);
+            if (pb) {
+                ws->zerocopy = 1;
+                /* Draw into a depth-capable pbuffer from the first frame; the
+                 * IOSurface pbuffer above is only a blit target. */
+                EGLSurface render = zc_render_pbuffer(sd, ws);
+                ws->angle_surface = render ? render : pb;
+                return (EGLSurface)ws;
+            }
+            /* Android ANGLE/META-EGL lack EGL_ANGLE_iosurface_client_buffer —
+             * fall through to the glReadPixels + AHB copy path (GBM parity). */
+            fprintf(stderr,
+                    "iland: Wayland zero-copy unavailable; using CPU copy path\n");
+        }
+
+        EGLint pb_attribs[] = {
+            EGL_WIDTH,  (EGLint)ws->width,
+            EGL_HEIGHT, (EGLint)ws->height,
+            EGL_NONE
+        };
+        ws->angle_surface = real_eglCreatePbufferSurface(sd->angle_display,
+                                                         config, pb_attribs);
+        if (!ws->angle_surface) {
             iland_wl_swapchain_destroy(ws->wl_swapchain);
             free(ws);
             return EGL_NO_SURFACE;
         }
-        ws->wl_slot = 0;
-        /* Draw into a depth-capable pbuffer from the first frame, not just from
-         * the first swap; the IOSurface pbuffer above is only a blit target. */
-        EGLSurface render = zc_render_pbuffer(sd, ws);
-        ws->angle_surface = render ? render : pb;
         return (EGLSurface)ws;
     }
 #endif
@@ -1234,8 +1332,13 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
 
 #ifdef ILAND_HAVE_WL_WINSYS
     if (ss->wayland) {
-        zc_drop_blit_objects(ss);
-        zc_drop_pbuffers(sd, ss);
+        if (ss->zerocopy) {
+            zc_drop_blit_objects(ss);
+            zc_drop_pbuffers(sd, ss);
+        } else if (ss->angle_surface) {
+            real_eglDestroySurface(sd->angle_display, ss->angle_surface);
+            ss->angle_surface = EGL_NO_SURFACE;
+        }
         iland_wl_swapchain_destroy(ss->wl_swapchain);
         free(ss);
         return EGL_TRUE;
@@ -1265,7 +1368,14 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw,
     EGLSurface adraw = sdraw ? sdraw->angle_surface : draw;
     EGLSurface aread = sread ? sread->angle_surface : read;
 
-    return real_eglMakeCurrent(sd->angle_display, adraw, aread, ctx);
+    EGLBoolean ok = real_eglMakeCurrent(sd->angle_display, adraw, aread, ctx);
+    if (!ok) {
+        fprintf(stderr,
+                "iland: eglMakeCurrent failed err=0x%x draw=%p read=%p ctx=%p\n",
+                real_eglGetError ? (unsigned)real_eglGetError() : 0,
+                (void *)adraw, (void *)aread, (void *)ctx);
+    }
+    return ok;
 }
 
 EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
@@ -1279,31 +1389,102 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
 
 #ifdef ILAND_HAVE_WL_WINSYS
     if (ss->wayland) {
-        /* The frame is in the render pbuffer (or, without one, already in the
-         * slot's IOSurface). Land the GPU work, hand the buffer to the
-         * compositor, then draw into a released slot. */
-        if (ss->render_pbuffer)
-            zc_blit_to_slot(sd, ss,
-                            ss->iosurf_pbuffers[ss->wl_slot]);
+        if (ss->zerocopy) {
+            /* The frame is in the render pbuffer (or, without one, already in the
+             * slot's IOSurface). Land the GPU work, hand the buffer to the
+             * compositor, then draw into a released slot. */
+            if (ss->render_pbuffer)
+                zc_blit_to_slot(sd, ss,
+                                ss->iosurf_pbuffers[ss->wl_slot]);
 
-        zc_flush_gpu(sd->angle_display);
+            zc_flush_gpu(sd->angle_display);
 
-        zc_probe_iosurface(iland_wl_swapchain_iosurface(ss->wl_swapchain,
-                                                        ss->wl_slot),
-                           "posting");
+            zc_probe_iosurface(iland_wl_swapchain_iosurface(ss->wl_swapchain,
+                                                            ss->wl_slot),
+                               "posting");
+
+            iland_wl_swapchain_post(ss->wl_swapchain, ss->wl_slot);
+
+            if (iland_wl_swapchain_check_resize(ss->wl_swapchain)) {
+                /* New IOSurfaces: the cached pbuffers point at freed surfaces. */
+                zc_drop_pbuffers(sd, ss);
+                iland_wl_swapchain_get_size(ss->wl_swapchain,
+                                            &ss->width, &ss->height);
+            }
+
+            int slot = iland_wl_swapchain_acquire(ss->wl_swapchain);
+            if (slot < 0) return EGL_FALSE;
+            return wl_bind_slot(sd, ss, slot);
+        }
+
+        /* CPU copy path: same idea as GBM when IOSurface client-buffer fails. */
+        IOSurfaceRef iosurf =
+            iland_wl_swapchain_iosurface(ss->wl_swapchain, ss->wl_slot);
+        uint32_t w = ss->width;
+        uint32_t h = ss->height;
+        size_t total = (size_t)w * h * 4;
+
+        if (!g_glReadPixels || !iosurf)
+            return real_eglSwapBuffers(sd->angle_display, ss->angle_surface);
+
+        if (g_pixels_sz < total) {
+            void *p = realloc(g_pixels, total);
+            if (!p)
+                return real_eglSwapBuffers(sd->angle_display, ss->angle_surface);
+            g_pixels = p;
+            g_pixels_sz = total;
+        }
+
+        g_glReadPixels(0, 0, (int)w, (int)h, 0x1908, 0x1401, g_pixels);
+
+        EGLBoolean ret =
+            real_eglSwapBuffers(sd->angle_display, ss->angle_surface);
+        if (!ret) return ret;
+
+        IOSurfaceLock(iosurf, 0, NULL);
+        uint8_t *dst8 = (uint8_t *)IOSurfaceGetBaseAddress(iosurf);
+        size_t dst_pitch_bytes = IOSurfaceGetBytesPerRow(iosurf);
+        const uint8_t *src8 = (const uint8_t *)g_pixels;
+        if (dst8 && dst_pitch_bytes > 0) {
+            for (uint32_t y = 0; y < h; y++) {
+                const uint8_t *s = src8 + (size_t)(h - 1 - y) * w * 4;
+                uint8_t *d = dst8 + (size_t)y * dst_pitch_bytes;
+                memcpy(d, s, (size_t)w * 4);
+            }
+            swap_rgba_to_bgra(dst8, w, h, dst_pitch_bytes);
+        }
+        IOSurfaceUnlock(iosurf, 0, NULL);
 
         iland_wl_swapchain_post(ss->wl_swapchain, ss->wl_slot);
 
         if (iland_wl_swapchain_check_resize(ss->wl_swapchain)) {
-            /* New IOSurfaces: the cached pbuffers point at freed surfaces. */
-            zc_drop_pbuffers(sd, ss);
-            iland_wl_swapchain_get_size(ss->wl_swapchain,
-                                        &ss->width, &ss->height);
+            iland_wl_swapchain_get_size(ss->wl_swapchain, &ss->width,
+                                        &ss->height);
+            if (ss->angle_surface) {
+                real_eglDestroySurface(sd->angle_display, ss->angle_surface);
+                ss->angle_surface = EGL_NO_SURFACE;
+            }
+            EGLint pb_attribs[] = {
+                EGL_WIDTH,  (EGLint)ss->width,
+                EGL_HEIGHT, (EGLint)ss->height,
+                EGL_NONE
+            };
+            ss->angle_surface = real_eglCreatePbufferSurface(
+                sd->angle_display, ss->config, pb_attribs);
+            if (ss->angle_surface) {
+                EGLContext cur = real_eglGetCurrentContext
+                                     ? real_eglGetCurrentContext()
+                                     : EGL_NO_CONTEXT;
+                if (cur != EGL_NO_CONTEXT)
+                    real_eglMakeCurrent(sd->angle_display, ss->angle_surface,
+                                        ss->angle_surface, cur);
+            }
         }
 
         int slot = iland_wl_swapchain_acquire(ss->wl_swapchain);
         if (slot < 0) return EGL_FALSE;
-        return wl_bind_slot(sd, ss, slot);
+        ss->wl_slot = slot;
+        return EGL_TRUE;
     }
 #endif
 
@@ -1367,14 +1548,7 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
         memcpy(d, s, (size_t)w * 4);
     }
 
-    /* Channel swap RGBA→BGRA using Accelerate (SIMD on Apple Silicon) */
-    vImage_Buffer buf = {
-        .data     = dst8,
-        .width    = w,
-        .height   = h,
-        .rowBytes = dst_pitch_bytes,
-    };
-    vImagePermuteChannels_ARGB8888(&buf, &buf, kRGBAToBGRAMap, 0);
+    swap_rgba_to_bgra(dst8, w, h, dst_pitch_bytes);
 
     IOSurfaceUnlock(iosurf, 0, NULL);
 

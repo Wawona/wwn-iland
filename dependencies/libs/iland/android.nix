@@ -88,26 +88,10 @@ old = "        g_zerocopy_enabled = (e && e[0] == '0') ? 0 : 1;"
 if old not in text:
     raise SystemExit("egl.c zerocopy default anchor missing")
 text = text.replace(old, "        g_zerocopy_enabled = 0; (void)e;", 1)
-old_vimage = """    vImage_Buffer buf = {
-        .data     = dst8,
-        .width    = w,
-        .height   = h,
-        .rowBytes = dst_pitch_bytes,
-    };
-    vImagePermuteChannels_ARGB8888(&buf, &buf, kRGBAToBGRAMap, 0);"""
-new_vimage = """    for (uint32_t y = 0; y < h; y++) {
-        uint8_t *row = dst8 + (size_t)y * dst_pitch_bytes;
-        for (uint32_t x = 0; x < w; x++) {
-            uint8_t *px = row + (size_t)x * 4;
-            uint8_t r = px[0], b = px[2];
-            px[0] = b;
-            px[2] = r;
-        }
-    }"""
-count = text.count(old_vimage)
-if count < 1:
-    raise SystemExit(f"egl.c vImage anchor missing (found {count})")
-text = text.replace(old_vimage, new_vimage)
+# Channel swap lives in swap_rgba_to_bgra() with an #ifdef __ANDROID__ arm —
+# no more vImage text rewrite here.
+if 'swap_rgba_to_bgra' not in text:
+    raise SystemExit("egl.c missing swap_rgba_to_bgra helper")
 # The Android libEGL.so / libGLESv2.so dlopen arms live in egl.c behind
 # `#elif defined(__ANDROID__)`. They used to be patched in here, anchored on the
 # macOS dlopen lines, which broke silently the moment those lines changed.
@@ -195,7 +179,7 @@ PY
   '';
 
   installPhase = ''
-    mkdir -p $out/lib $out/include/EGL $out/include/GLES2 $out/include/GLES3 $out/include/KHR $out/nix-support
+    mkdir -p $out/lib $out/lib/pkgconfig $out/include/EGL $out/include/GLES2 $out/include/GLES3 $out/include/KHR $out/nix-support
 
     cp libiland_userland.a $out/lib/
     cp libiland_wayland_egl.a $out/lib/
@@ -228,6 +212,20 @@ PY
     cp -r ${angle}/include/GLES2/. $out/include/GLES2/
     cp -r ${angle}/include/GLES3/. $out/include/GLES3/ || true
     cp -r ${angle}/include/KHR/.   $out/include/KHR/
+
+    # waypipe wrap-gbm + meson clients expect pkg-config `gbm`.
+    cat > $out/lib/pkgconfig/gbm.pc <<EOF
+prefix=$out
+exec_prefix=\''${prefix}
+libdir=\''${exec_prefix}/lib
+includedir=\''${prefix}/include
+
+Name: gbm
+Description: iland userland GBM (AHB-backed) for Android
+Version: 0.1.0
+Libs: -L\''${libdir} -liland_userland
+Cflags: -I\''${includedir}
+EOF
 
     echo "${angle}" > $out/nix-support/angle-path
     echo "dylib" > $out/nix-support/link-kind
