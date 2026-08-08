@@ -392,7 +392,16 @@ static int load_angle(void)
     if (!graphics_policy_allows_angle()) return -1;
     if (g_angle_handle) return 0;
 #if TARGET_OS_IPHONE
+    /*
+     * Prefer the framework-wrapped ANGLE binary: App Store packaging forbids
+     * loose .dylib files inside Frameworks/ (TN2435) — ASC's validator
+     * misreads them as pre-ABI Swift runtime dylibs and rejects the whole
+     * ipa with rotating ITMS-90426/90429/90433. Device bundles ship ANGLE
+     * only as libEGL.framework/libGLESv2.framework; the flat paths remain
+     * as a fallback for simulator/dev bundles that still carry them.
+     */
     static const char *candidates[] = {
+        "@executable_path/Frameworks/libEGL.framework/libEGL",
         "@executable_path/Frameworks/libEGL.dylib",
         "libEGL.dylib",
         NULL,
@@ -487,7 +496,10 @@ static void load_gles2(void)
 {
     if (g_glReadPixels) return;
 #if TARGET_OS_IPHONE
+    /* Framework-wrapped first — see load_angle(): loose Frameworks/*.dylib
+     * are banned from App Store bundles (TN2435). */
     static const char *candidates[] = {
+        "@executable_path/Frameworks/libGLESv2.framework/libGLESv2",
         "@executable_path/Frameworks/libGLESv2.dylib",
         "libGLESv2.dylib",
         NULL,
