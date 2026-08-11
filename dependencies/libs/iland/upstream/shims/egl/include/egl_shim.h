@@ -28,6 +28,15 @@ typedef struct EGLShimDisplay {
     EGLShimDisplayKind kind;
     struct wl_display *wl_display;
     IlandWlWinsys *wl_winsys;      /* bound lazily at eglInitialize */
+
+    /* Every wrapper handed out by eglGetDisplay / eglGetPlatformDisplay wraps
+     * the SAME process-wide ANGLE EGL_DEFAULT_DISPLAY. eglTerminate on one
+     * wrapper must not tear that shared display out from under the host
+     * compositor or another in-process client (that is how a failed
+     * gbm-es2-demo init used to abort the whole app). Track whether this
+     * wrapper counts toward the shared refcount so eglTerminate only really
+     * terminates ANGLE when the last holder releases it. */
+    int initialized;
 } EGLShimDisplay;
 
 typedef struct EGLShimSurface {

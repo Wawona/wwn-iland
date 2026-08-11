@@ -222,6 +222,35 @@ static void (*g_glDeleteFramebuffers)(int, const unsigned int *) = NULL;
 #define GL_TEXTURE_BINDING_2D               0x8069
 #endif
 
+/* EGL_EXT_image_dma_buf_import — enums are not in stock EGL/egl.h. iland
+ * provides this extension over ANGLE by resolving the "dma_buf" back to the
+ * IOSurface the modifier encodes (see eglCreateImageKHR below). */
+#ifndef EGL_KHR_image
+typedef void *EGLImageKHR;
+#define EGL_NO_IMAGE_KHR                    ((EGLImageKHR)0)
+#endif
+#ifndef EGL_LINUX_DMA_BUF_EXT
+#define EGL_LINUX_DMA_BUF_EXT               0x3270
+#endif
+#ifndef EGL_LINUX_DRM_FOURCC_EXT
+#define EGL_LINUX_DRM_FOURCC_EXT            0x3271
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_FD_EXT
+#define EGL_DMA_BUF_PLANE0_FD_EXT           0x3272
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_OFFSET_EXT
+#define EGL_DMA_BUF_PLANE0_OFFSET_EXT       0x3273
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_PITCH_EXT
+#define EGL_DMA_BUF_PLANE0_PITCH_EXT        0x3274
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT
+#define EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT  0x3443
+#endif
+#ifndef EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT
+#define EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT  0x3444
+#endif
+
 /* Set once at first surface creation from $ILAND_EGL_ZEROCOPY. */
 static int g_zerocopy_enabled = -1;
 
@@ -595,6 +624,18 @@ static EGLShimSurface *unwrap_surface(EGLSurface surf)
 #define WWN_REQUIRE_ANGLE(fail_value) \
     do { if (load_angle() < 0) return (fail_value); } while (0)
 
+/*
+ * Every EGLShimDisplay wraps the one process-wide ANGLE EGL_DEFAULT_DISPLAY.
+ * eglInitialize/eglTerminate are refcounted per the EGL spec, but ANGLE cannot
+ * see that N in-process consumers (the host compositor + each bundled GL
+ * client) share the same handle. Without this refcount, the first client to
+ * eglTerminate() tore down ANGLE for everyone — a failed gbm-es2-demo init
+ * runs its C++ destructor's eglTerminate and used to abort the whole Wawona
+ * process. Count live initializations of the shared display here and only
+ * dispatch the real eglTerminate when the last holder releases it.
+ */
+static int g_angle_shared_init_refs = 0;
+
 EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id)
 {
     if (load_angle() < 0) return EGL_NO_DISPLAY;
@@ -671,6 +712,14 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
     if (!real_eglInitialize(sd->angle_display, major, minor))
         return EGL_FALSE;
 
+    /* First successful init on this wrapper takes a reference on the shared
+     * ANGLE display; repeated eglInitialize on the same wrapper is idempotent
+     * (EGL spec) and must not double-count. */
+    if (!sd->initialized) {
+        sd->initialized = 1;
+        g_angle_shared_init_refs++;
+    }
+
 #ifdef ILAND_HAVE_WL_WINSYS
     if (sd->kind == EGL_SHIM_DISPLAY_WAYLAND && !sd->wl_winsys) {
         /* Bind linux-dmabuf now so a compositor without it fails here, where
@@ -689,8 +738,25 @@ EGLBoolean eglTerminate(EGLDisplay dpy)
     WWN_REQUIRE_ANGLE(EGL_FALSE);
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglTerminate(dpy);
-    EGLBoolean ret = real_eglTerminate(sd->angle_display);
-    if (g_pixels) { free(g_pixels); g_pixels = NULL; g_pixels_sz = 0; }
+
+    /* Only the last holder of the shared ANGLE display may really terminate it.
+     * A client (e.g. a failed gbm-es2-demo init) tearing down its own wrapper
+     * must leave ANGLE alive for the host compositor and other in-process
+     * clients. */
+    EGLBoolean ret = EGL_TRUE;
+    int last = 0;
+    if (sd->initialized) {
+        sd->initialized = 0;
+        if (g_angle_shared_init_refs > 0 && --g_angle_shared_init_refs == 0)
+            last = 1;
+    }
+    if (last) {
+        ret = real_eglTerminate(sd->angle_display);
+        /* g_pixels is the shared glReadPixels scratch buffer; freeing it while
+         * another client is still presenting would corrupt that path, so only
+         * release it on the final terminate. */
+        if (g_pixels) { free(g_pixels); g_pixels = NULL; g_pixels_sz = 0; }
+    }
 #ifdef ILAND_HAVE_WL_WINSYS
     if (sd->wl_winsys) iland_wl_winsys_destroy(sd->wl_winsys);
 #endif
@@ -724,6 +790,30 @@ const char *eglQueryString(EGLDisplay dpy, EGLint name)
     if (!real_eglQueryString) return NULL;
     EGLShimDisplay *sd = unwrap_display(dpy);
     if (!sd) return real_eglQueryString(dpy, name);
+
+    /* Advertise iland's dma_buf import so KMS/GBM clients (gbm-es2-demo) take
+     * their real EGLImage path instead of bailing at the extension check. The
+     * eglCreateImageKHR above backs it with the bo's IOSurface. */
+    if (name == EGL_EXTENSIONS) {
+        const char *base = real_eglQueryString(sd->angle_display, EGL_EXTENSIONS);
+        static char *augmented = NULL;
+        static const char *augmented_base = NULL;
+        static const char kAdd[] =
+            "EGL_EXT_image_dma_buf_import EGL_EXT_image_dma_buf_import_modifiers";
+        if (base && !strstr(base, "EGL_EXT_image_dma_buf_import")) {
+            if (!augmented || augmented_base != base) {
+                free(augmented);
+                size_t n = strlen(base) + 1 + sizeof(kAdd) + 1;
+                augmented = malloc(n);
+                if (augmented) {
+                    snprintf(augmented, n, "%s %s", base, kAdd);
+                    augmented_base = base;
+                }
+            }
+            if (augmented) return augmented;
+        }
+        return base;
+    }
     return real_eglQueryString(sd->angle_display, name);
 }
 
@@ -925,6 +1015,161 @@ static EGLSurface zc_pbuffer_for_bo(EGLShimDisplay *sd, EGLShimSurface *ss,
                                     int idx, struct gbm_bo *bo)
 {
     return zc_pbuffer_for_iosurface(sd, ss, idx, gbm_bo_get_iosurface(bo));
+}
+
+/*
+ * EGL_EXT_image_dma_buf_import over iland.
+ *
+ * gbm-es2-demo (a DRM/KMS/GBM client, like it is on Linux over waypipe) imports
+ * its scanout gbm bo as an EGLImage, binds it to a GL texture, and renders the
+ * cube into it through an FBO. On Linux that import is a real dma_buf; on iland
+ * the buffer is an IOSurface and the "dma_buf fd" is a /dev/null placeholder —
+ * gbm_bo_get_modifier() carries the IOSurface id instead (shims/gbm/gbm.m).
+ * We resolve that id back to the IOSurface and hand ANGLE an
+ * EGL_ANGLE_iosurface_client_buffer pbuffer, exactly as the zero-copy window
+ * path does, so the client keeps its own dma_buf-import render path while iland
+ * supplies the buffer underneath it. Without this, ANGLE/SwiftShader lack
+ * EGL_EXT_image_dma_buf_import and the client cannot render at all.
+ */
+typedef struct EGLShimImage {
+    EGLShimDisplay *sd;
+    IOSurfaceRef    io;        /* +1 ref held from IOSurfaceLookup */
+    EGLSurface      pbuffer;   /* ANGLE IOSurface-client-buffer pbuffer */
+} EGLShimImage;
+
+/* An IOSurface-bindable, texture-renderable config. ANGLE's default display is
+ * process-wide, so cache the first match. */
+static EGLConfig image_iosurface_config(EGLShimDisplay *sd)
+{
+    static EGLConfig cached = NULL;
+    static int tried = 0;
+    if (tried) return cached;
+    tried = 1;
+    if (!real_eglChooseConfig) return NULL;
+    const EGLint attrs[] = {
+        EGL_SURFACE_TYPE,          EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE,       EGL_OPENGL_ES2_BIT,
+        EGL_RED_SIZE,   8, EGL_GREEN_SIZE, 8,
+        EGL_BLUE_SIZE,  8, EGL_ALPHA_SIZE, 8,
+        EGL_BIND_TO_TEXTURE_RGBA,  EGL_TRUE,
+        EGL_NONE
+    };
+    EGLConfig c = NULL;
+    EGLint n = 0;
+    if (real_eglChooseConfig(sd->angle_display, attrs, &c, 1, &n) && n == 1)
+        cached = c;
+    return cached;
+}
+
+EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
+                              EGLClientBuffer buffer, const EGLint *attrib_list)
+{
+    (void)ctx; (void)buffer;
+    if (load_angle() < 0) return EGL_NO_IMAGE_KHR;
+    EGLShimDisplay *sd = unwrap_display(dpy);
+    if (!sd) return EGL_NO_IMAGE_KHR;
+
+    /* Only iland's userspace KMS/GBM dma_buf import is handled here. */
+    if (target != EGL_LINUX_DMA_BUF_EXT) return EGL_NO_IMAGE_KHR;
+
+    EGLint width = 0, height = 0;
+    uint32_t mod_lo = 0, mod_hi = 0;
+    for (const EGLint *a = attrib_list; a && a[0] != EGL_NONE; a += 2) {
+        switch (a[0]) {
+        case EGL_WIDTH:  width  = a[1]; break;
+        case EGL_HEIGHT: height = a[1]; break;
+        case EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT: mod_lo = (uint32_t)a[1]; break;
+        case EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT: mod_hi = (uint32_t)a[1]; break;
+        default: break;
+        }
+    }
+
+    uint64_t modifier = ((uint64_t)mod_hi << 32) | (uint64_t)mod_lo;
+    if (!(modifier & 0x8000000000000000ULL)) {
+        fprintf(stderr,
+                "iland: eglCreateImageKHR(dma_buf) requires the iland IOSurface "
+                "modifier (EGL_DMA_BUF_PLANE0_MODIFIER_{LO,HI}_EXT)\n");
+        return EGL_NO_IMAGE_KHR;
+    }
+    uint32_t surface_id = (uint32_t)(modifier & 0x7fffffffffffffffULL);
+    IOSurfaceRef io = IOSurfaceLookup(surface_id);
+    if (!io) {
+        fprintf(stderr,
+                "iland: eglCreateImageKHR: IOSurfaceLookup(%u) failed\n",
+                surface_id);
+        return EGL_NO_IMAGE_KHR;
+    }
+
+    EGLConfig config = image_iosurface_config(sd);
+    if (!config || !real_eglCreatePbufferFromClientBuffer) {
+        CFRelease(io);
+        return EGL_NO_IMAGE_KHR;
+    }
+    if (width <= 0)  width  = (EGLint)IOSurfaceGetWidth(io);
+    if (height <= 0) height = (EGLint)IOSurfaceGetHeight(io);
+
+    EGLint egl_tex_target = zc_egl_texture_target(sd, config);
+    const EGLint pb_attribs[] = {
+        EGL_WIDTH,                          width,
+        EGL_HEIGHT,                         height,
+        EGL_IOSURFACE_PLANE_ANGLE,          0,
+        EGL_TEXTURE_TARGET,                 egl_tex_target,
+        EGL_TEXTURE_INTERNAL_FORMAT_ANGLE,  GL_BGRA_EXT,
+        EGL_TEXTURE_FORMAT,                 EGL_TEXTURE_RGBA,
+        EGL_TEXTURE_TYPE_ANGLE,             GL_UNSIGNED_BYTE,
+        EGL_NONE
+    };
+    EGLSurface pb = real_eglCreatePbufferFromClientBuffer(
+        sd->angle_display, EGL_IOSURFACE_ANGLE, (EGLClientBuffer)io, config,
+        pb_attribs);
+    if (pb == EGL_NO_SURFACE) {
+        fprintf(stderr,
+                "iland: eglCreateImageKHR: IOSurface pbuffer failed (0x%04x)\n",
+                real_eglGetError ? real_eglGetError() : 0);
+        CFRelease(io);
+        return EGL_NO_IMAGE_KHR;
+    }
+
+    EGLShimImage *img = calloc(1, sizeof(*img));
+    if (!img) {
+        real_eglDestroySurface(sd->angle_display, pb);
+        CFRelease(io);
+        return EGL_NO_IMAGE_KHR;
+    }
+    img->sd = sd;
+    img->io = io;
+    img->pbuffer = pb;
+    return (EGLImageKHR)img;
+}
+
+EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
+{
+    (void)dpy;
+    EGLShimImage *img = (EGLShimImage *)image;
+    if (!img) return EGL_FALSE;
+    if (img->sd && img->pbuffer) {
+        if (real_eglReleaseTexImage)
+            real_eglReleaseTexImage(img->sd->angle_display, img->pbuffer,
+                                    EGL_BACK_BUFFER);
+        if (real_eglDestroySurface)
+            real_eglDestroySurface(img->sd->angle_display, img->pbuffer);
+    }
+    if (img->io) CFRelease(img->io);
+    free(img);
+    return EGL_TRUE;
+}
+
+/* glEGLImageTargetTexture2DOES: bind the IOSurface behind the image to the
+ * texture the caller has bound in the current context. ANGLE's IOSurface
+ * client-buffer textures are colour-renderable, so the demo can attach the
+ * resulting texture to an FBO and render straight into the scanout IOSurface —
+ * the same present path kmscube uses. */
+void glEGLImageTargetTexture2DOES(unsigned int target, void *image)
+{
+    (void)target;
+    EGLShimImage *img = (EGLShimImage *)image;
+    if (!img || !img->sd || !img->pbuffer || !real_eglBindTexImage) return;
+    real_eglBindTexImage(img->sd->angle_display, img->pbuffer, EGL_BACK_BUFFER);
 }
 
 /* GLES3 enums; GLES2/gl2.h predates them. Depth-blit helpers below serve both
@@ -1624,6 +1869,13 @@ static const struct {
     { "eglSwapInterval",          (void *)eglSwapInterval },
     { "eglGetError",              (void *)eglGetError },
     { "eglGetProcAddress",        (void *)eglGetProcAddress },
+    /* iland dma_buf import (EGL_EXT_image_dma_buf_import). ANGLE also answers
+     * for these but knows nothing about iland's IOSurface-in-modifier scheme,
+     * so a client resolving them dynamically must get the shim's versions. */
+    { "eglCreateImageKHR",        (void *)eglCreateImageKHR },
+    { "eglDestroyImageKHR",       (void *)eglDestroyImageKHR },
+    { "glEGLImageTargetTexture2DOES",
+      (void *)glEGLImageTargetTexture2DOES },
 };
 
 __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *procname)
