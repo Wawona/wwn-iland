@@ -1169,10 +1169,21 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
             CFRelease(io);
             return EGL_NO_IMAGE_KHR;
         }
-        const EGLint img_attrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+        /* EGL_ANDROID_image_native_buffer accepts EGL_IMAGE_PRESERVED_KHR, but
+         * the Android emulator's ANGLE rejects it with EGL_BAD_PARAMETER; a
+         * render-target scanout buffer does not need preserved contents, so try
+         * the empty attrib list first and only fall back to PRESERVED if the
+         * driver actually wants it. */
+        const EGLint img_attrs_none[] = {EGL_NONE};
+        const EGLint img_attrs_pres[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE,
+                                         EGL_NONE};
         EGLImageKHR angle_img = g_real_eglCreateImageKHR(
             sd->angle_display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, cb,
-            img_attrs);
+            img_attrs_none);
+        if (angle_img == EGL_NO_IMAGE_KHR)
+            angle_img = g_real_eglCreateImageKHR(
+                sd->angle_display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, cb,
+                img_attrs_pres);
         if (angle_img == EGL_NO_IMAGE_KHR) {
             fprintf(stderr,
                     "iland: eglCreateImageKHR(NATIVE_BUFFER_ANDROID) failed "
