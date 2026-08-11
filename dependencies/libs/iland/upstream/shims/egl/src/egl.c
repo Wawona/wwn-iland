@@ -37,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <IOSurface/IOSurfaceRef.h>
 #include <Accelerate/Accelerate.h>
 
@@ -185,6 +186,10 @@ static void (*g_glFramebufferTexture2D)(unsigned int, unsigned int,
 static unsigned int (*g_glCheckFramebufferStatus)(unsigned int) = NULL;
 static void (*g_glDeleteTextures)(int, const unsigned int *) = NULL;
 static void (*g_glDeleteFramebuffers)(int, const unsigned int *) = NULL;
+/* Android CPU-readback fallback (#140): give a client's EGLImage texture real
+ * RGBA storage when the AHB native-buffer import is unavailable. */
+static void (*g_glTexImage2D)(unsigned int, int, int, int, int, int,
+                              unsigned int, unsigned int, const void *) = NULL;
 
 /* EGL_ANGLE_iosurface_client_buffer constants (ANGLE-specific; not in stock
  * EGL/egl.h). Values are stable across ANGLE releases. */
@@ -391,6 +396,7 @@ static void load_gles2(void)
     g_glCheckFramebufferStatus = glCheckFramebufferStatus;
     g_glDeleteTextures = glDeleteTextures;
     g_glDeleteFramebuffers = glDeleteFramebuffers;
+    g_glTexImage2D = glTexImage2D;
     if (real_eglGetProcAddress) {
         g_glBlitFramebuffer = (void (*)(int, int, int, int, int, int, int, int,
                                         unsigned int, unsigned int))
@@ -587,6 +593,7 @@ static void load_gles2(void)
     g_glCheckFramebufferStatus = dlsym(h, "glCheckFramebufferStatus");
     g_glDeleteTextures     = dlsym(h, "glDeleteTextures");
     g_glDeleteFramebuffers = dlsym(h, "glDeleteFramebuffers");
+    g_glTexImage2D         = dlsym(h, "glTexImage2D");
     if (real_eglGetProcAddress) {
         g_eglCreateSync = (void *)real_eglGetProcAddress("eglCreateSync");
         if (!g_eglCreateSync)
@@ -1036,6 +1043,18 @@ typedef struct EGLShimImage {
     IOSurfaceRef    io;        /* +1 ref held from IOSurfaceLookup */
     EGLSurface      pbuffer;   /* Apple: ANGLE IOSurface-client-buffer pbuffer */
     EGLImageKHR     angle_image; /* Android: real ANGLE EGLImage from AHB */
+#if defined(__ANDROID__)
+    /* CPU-readback fallback (#140): the emulator's ANGLE runs on SwiftShader
+     * software Vulkan, which lacks VK_ANDROID_external_memory_android_hardware_
+     * buffer, so the AHB cannot be a GPU render target. The client then renders
+     * into a plain GL texture (given storage in glEGLImageTargetTexture2DOES),
+     * and drmModePageFlip copies that texture into the scanout AHB by CPU. */
+    int             cpu_fallback;  /* AHB import failed; readback on present */
+    unsigned int    client_tex;    /* client texture bound in the target call */
+    uint32_t        surface_id;    /* IOSurfaceGetID key for the present hook */
+    int             width, height;
+    struct EGLShimImage *reg_next; /* CPU-fallback registry linkage */
+#endif
 } EGLShimImage;
 
 #if defined(__ANDROID__)
@@ -1086,6 +1105,44 @@ static int android_ahb_import_load(void)
             g_real_eglDestroyImageKHR && g_real_glEGLImageTargetTexture2DOES)
                ? 0
                : -1;
+}
+
+/* GL enums used by the CPU-readback fallback. Named to avoid clashing with the
+ * WWN_GL_* set defined further down (past the EGLImage functions). */
+#define WWN_AHBFB_TEXTURE_2D          0x0DE1
+#define WWN_AHBFB_TEXTURE_BINDING_2D  0x8069
+#define WWN_AHBFB_RGBA                0x1908
+#define WWN_AHBFB_UNSIGNED_BYTE       0x1401
+#define WWN_AHBFB_FRAMEBUFFER         0x8D40
+#define WWN_AHBFB_FRAMEBUFFER_BINDING 0x8CA6
+#define WWN_AHBFB_COLOR_ATTACHMENT0   0x8CE0
+
+/* Registry of CPU-fallback images keyed by scanout IOSurface id. The DRM
+ * page-flip path (drm_linux.c) calls iland_egl_flush_scanout_if_pending() with
+ * the id of the buffer being scanned out; we look the image up here and copy
+ * its client texture into the AHB. Both the client's GL work and the flip run
+ * on the same client thread, so the client's GL context is current at flush. */
+static pthread_mutex_t g_cpu_fb_lock = PTHREAD_MUTEX_INITIALIZER;
+static EGLShimImage   *g_cpu_fb_images = NULL;
+static unsigned int    g_cpu_fb_readfbo = 0; /* lazily created readback FBO */
+
+static void cpu_fallback_register(EGLShimImage *img)
+{
+    pthread_mutex_lock(&g_cpu_fb_lock);
+    img->reg_next = g_cpu_fb_images;
+    g_cpu_fb_images = img;
+    pthread_mutex_unlock(&g_cpu_fb_lock);
+}
+
+static void cpu_fallback_unregister(EGLShimImage *img)
+{
+    pthread_mutex_lock(&g_cpu_fb_lock);
+    EGLShimImage **pp = &g_cpu_fb_images;
+    while (*pp) {
+        if (*pp == img) { *pp = img->reg_next; break; }
+        pp = &(*pp)->reg_next;
+    }
+    pthread_mutex_unlock(&g_cpu_fb_lock);
 }
 #endif
 
@@ -1185,12 +1242,33 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
                 sd->angle_display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, cb,
                 img_attrs_pres);
         if (angle_img == EGL_NO_IMAGE_KHR) {
-            fprintf(stderr,
-                    "iland: eglCreateImageKHR(NATIVE_BUFFER_ANDROID) failed "
-                    "(0x%04x)\n",
-                    real_eglGetError ? real_eglGetError() : 0);
-            CFRelease(io);
-            return EGL_NO_IMAGE_KHR;
+            /* Software GPU (emulator SwiftShader Vulkan) cannot import the AHB
+             * as a GPU render target. Rather than fail the unmodified client
+             * (which then aborts with "cannot create framebuffer"), fall back to
+             * a CPU-readback path: the client renders into a plain GL texture
+             * and drmModePageFlip copies it into the scanout AHB (#140). Only
+             * the platform beneath the client changes — port-faithful. */
+            EGLShimImage *fb = calloc(1, sizeof(*fb));
+            if (!fb) { CFRelease(io); return EGL_NO_IMAGE_KHR; }
+            fb->sd = sd;
+            fb->io = io;                 /* keeps the AHB alive behind the image */
+            fb->pbuffer = EGL_NO_SURFACE;
+            fb->angle_image = EGL_NO_IMAGE_KHR;
+            fb->cpu_fallback = 1;
+            fb->surface_id = surface_id;
+            fb->width  = width  > 0 ? width  : (int)IOSurfaceGetWidth(io);
+            fb->height = height > 0 ? height : (int)IOSurfaceGetHeight(io);
+            cpu_fallback_register(fb);
+            static int warned = 0;
+            if (!warned) {
+                warned = 1;
+                fprintf(stderr,
+                        "iland: AHB native-buffer import unavailable "
+                        "(0x%04x); using CPU-readback present for gbm "
+                        "(#140)\n",
+                        real_eglGetError ? real_eglGetError() : 0);
+            }
+            return (EGLImageKHR)fb;
         }
         EGLShimImage *img = calloc(1, sizeof(*img));
         if (!img) {
@@ -1254,6 +1332,8 @@ EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
     EGLShimImage *img = (EGLShimImage *)image;
     if (!img) return EGL_FALSE;
 #if defined(__ANDROID__)
+    if (img->cpu_fallback)
+        cpu_fallback_unregister(img);
     if (img->sd && img->angle_image && g_real_eglDestroyImageKHR)
         g_real_eglDestroyImageKHR(img->sd->angle_display, img->angle_image);
 #endif
@@ -1285,6 +1365,19 @@ void glEGLImageTargetTexture2DOES(unsigned int target, void *image)
         g_real_glEGLImageTargetTexture2DOES(target, img->angle_image);
         return;
     }
+    /* CPU-readback fallback (#140): no dmabuf alias is possible, so give the
+     * client's currently bound texture real RGBA8 storage and remember its id.
+     * The client attaches it to an FBO and renders; drmModePageFlip reads it
+     * back into the scanout AHB. */
+    if (img->cpu_fallback && g_glTexImage2D && g_glGetIntegerv) {
+        int bound = 0;
+        g_glGetIntegerv(WWN_AHBFB_TEXTURE_BINDING_2D, &bound);
+        img->client_tex = (unsigned int)bound;
+        g_glTexImage2D(target ? target : WWN_AHBFB_TEXTURE_2D, 0, WWN_AHBFB_RGBA,
+                       img->width, img->height, 0, WWN_AHBFB_RGBA,
+                       WWN_AHBFB_UNSIGNED_BYTE, NULL);
+        return;
+    }
 #endif
     (void)target;
     if (!img->pbuffer || img->pbuffer == EGL_NO_SURFACE || !real_eglBindTexImage)
@@ -1303,6 +1396,78 @@ void glEGLImageTargetTexture2DOES(unsigned int target, void *image)
 #define WWN_GL_NEAREST                   0x2600
 #define WWN_GL_COLOR_ATTACHMENT0         0x8CE0
 #define WWN_GL_FRAMEBUFFER_COMPLETE      0x8CD5
+
+#if defined(__ANDROID__)
+/* Called from the DRM page-flip path (drm_linux.c) just before the buffer is
+ * presented. If the scanout IOSurface is backed by a CPU-fallback EGLImage
+ * (#140: AHB native-buffer import unavailable on the software-GPU emulator),
+ * read the client's render texture back into the AHB so the compositor sees the
+ * frame. The client's GL context is current here (it renders then flips on the
+ * same thread), matching the eglSwapBuffers CPU-copy precedent above. No-op when
+ * the id has no pending fallback image (the common HW-import / Apple case). */
+void iland_egl_flush_scanout_if_pending(uint32_t surface_id)
+{
+    pthread_mutex_lock(&g_cpu_fb_lock);
+    EGLShimImage *img = g_cpu_fb_images;
+    while (img && img->surface_id != surface_id) img = img->reg_next;
+    pthread_mutex_unlock(&g_cpu_fb_lock);
+    if (!img || !img->cpu_fallback || !img->client_tex || !img->io) return;
+    if (!g_glReadPixels || !g_glGenFramebuffers || !g_glBindFramebuffer ||
+        !g_glFramebufferTexture2D || !g_glGetIntegerv)
+        return;
+
+    const int w = img->width, h = img->height;
+    if (w <= 0 || h <= 0) return;
+    const size_t total = (size_t)w * h * 4;
+    if (g_pixels_sz < total) {
+        void *p = realloc(g_pixels, total);
+        if (!p) return;
+        g_pixels = p;
+        g_pixels_sz = total;
+    }
+
+    int prev_fbo = 0;
+    g_glGetIntegerv(WWN_AHBFB_FRAMEBUFFER_BINDING, &prev_fbo);
+    if (!g_cpu_fb_readfbo) {
+        g_glGenFramebuffers(1, &g_cpu_fb_readfbo);
+        if (!g_cpu_fb_readfbo) return;
+    }
+    g_glBindFramebuffer(WWN_AHBFB_FRAMEBUFFER, g_cpu_fb_readfbo);
+    g_glFramebufferTexture2D(WWN_AHBFB_FRAMEBUFFER, WWN_AHBFB_COLOR_ATTACHMENT0,
+                             WWN_AHBFB_TEXTURE_2D, img->client_tex, 0);
+    if (g_glCheckFramebufferStatus) {
+        unsigned int st = g_glCheckFramebufferStatus(WWN_AHBFB_FRAMEBUFFER);
+        if (st != WWN_GL_FRAMEBUFFER_COMPLETE) {
+            g_glFramebufferTexture2D(WWN_AHBFB_FRAMEBUFFER,
+                                     WWN_AHBFB_COLOR_ATTACHMENT0,
+                                     WWN_AHBFB_TEXTURE_2D, 0, 0);
+            g_glBindFramebuffer(WWN_AHBFB_FRAMEBUFFER, (unsigned int)prev_fbo);
+            return;
+        }
+    }
+
+    g_glReadPixels(0, 0, w, h, WWN_AHBFB_RGBA, WWN_AHBFB_UNSIGNED_BYTE,
+                   g_pixels);
+
+    g_glFramebufferTexture2D(WWN_AHBFB_FRAMEBUFFER, WWN_AHBFB_COLOR_ATTACHMENT0,
+                             WWN_AHBFB_TEXTURE_2D, 0, 0);
+    g_glBindFramebuffer(WWN_AHBFB_FRAMEBUFFER, (unsigned int)prev_fbo);
+
+    IOSurfaceLock(img->io, 0, NULL);
+    uint8_t *dst8 = (uint8_t *)IOSurfaceGetBaseAddress(img->io);
+    size_t pitch = IOSurfaceGetBytesPerRow(img->io);
+    const uint8_t *src8 = (const uint8_t *)g_pixels;
+    if (dst8 && pitch > 0) {
+        for (int y = 0; y < h; y++) {
+            const uint8_t *s = src8 + (size_t)(h - 1 - y) * (size_t)w * 4;
+            uint8_t *d = dst8 + (size_t)y * pitch;
+            memcpy(d, s, (size_t)w * 4);
+        }
+        swap_rgba_to_bgra(dst8, (uint32_t)w, (uint32_t)h, pitch);
+    }
+    IOSurfaceUnlock(img->io, 0, NULL);
+}
+#endif
 
 /* An ANGLE pbuffer wrapping an IOSurface has the IOSurface as its colour
  * attachment and nothing else: no depth, no stencil, whatever the config asked

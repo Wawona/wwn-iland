@@ -29,6 +29,13 @@
 
 /* ── Mode A in-window present hook (see iland_present.h) ───────────────── */
 
+#if defined(__ANDROID__)
+/* Defined in the EGL shim (egl.c); both link into libiland_userland.a. Copies a
+ * CPU-fallback client render texture into the scanout AHB before present when
+ * the software-GPU emulator's ANGLE cannot import the AHB directly (#140). */
+extern void iland_egl_flush_scanout_if_pending(uint32_t surface_id);
+#endif
+
 static iland_present_callback_t g_present_cb   = NULL;
 static void                    *g_present_user = NULL;
 static iland_cursor_callback_t  g_cursor_cb    = NULL;
@@ -914,6 +921,14 @@ int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
 
     IOSurfaceRef surf = fb_id_to_surface(fb_id);
 
+#if defined(__ANDROID__)
+    /* #140: if this scanout buffer is backed by a CPU-fallback EGLImage (the
+     * software-GPU emulator's ANGLE could not import the AHB as a render
+     * target), copy the client's render texture into the AHB before present.
+     * No-op for HW-import / non-gbm-EGLImage buffers. */
+    if (surf) iland_egl_flush_scanout_if_pending(IOSurfaceGetID(surf));
+#endif
+
     int ret;
     if (g_present_cb) {
         /* Mode A — present in-window, in-process. No Mach IPC / daemon. */
@@ -1726,6 +1741,13 @@ int drmModeAtomicCommit(int fd, drmModeAtomicReq *req,
                         if (g_cursor_cb)
                             g_cursor_cb(0 /*set*/, 0, 0, surf, g_cursor_user);
                     } else {
+#if defined(__ANDROID__)
+                        /* #140: CPU-fallback readback into the AHB before the
+                         * atomic (Weston nested DRM) present, mirroring the
+                         * legacy page-flip path. No-op otherwise. */
+                        iland_egl_flush_scanout_if_pending(
+                            IOSurfaceGetID(surf));
+#endif
                         g_present_cb(1 /*crtc*/, (uint32_t)val, surf, flags,
                                      g_present_user);
                         g_state.crtc_fb_id = (uint32_t)val;
