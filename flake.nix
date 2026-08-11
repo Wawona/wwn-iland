@@ -82,8 +82,10 @@
         swiftshader = withPlatformVariants {
           android = ./dependencies/libs/swiftshader/android.nix;
           wearos = ./dependencies/libs/swiftshader/wearos.nix;
-          ios = null;
-          macos = null;
+          ios = ./dependencies/libs/swiftshader/ios.nix;
+          ipados = ./dependencies/libs/swiftshader/ios.nix;
+          visionos = ./dependencies/libs/swiftshader/ios.nix;
+          macos = ./dependencies/libs/swiftshader/macos.nix;
         };
         moltenvk = withPlatformVariants {
           ios = ./dependencies/libs/moltenvk/apple-mobile.nix;
@@ -154,6 +156,10 @@
           moltenvk-visionos-sim = tc.buildForVisionOS "moltenvk" { simulator = true; };
           moltenvk-macos = tc.buildForMacOS "moltenvk" { };
           kosmickrisp-macos = tc.buildForMacOS "kosmickrisp" { };
+          swiftshader-macos = tc.buildForMacOS "swiftshader" { };
+          swiftshader-ios = tc.buildForIOS "swiftshader" { };
+          swiftshader-ios-sim = tc.buildForIOS "swiftshader" { simulator = true; };
+          swiftshader-visionos-sim = tc.buildForVisionOS "swiftshader" { simulator = true; };
         } else { }) // {
           iland-android = tc.buildForAndroid "iland" { };
           swiftshader-android = tc.buildForAndroid "swiftshader" { };
