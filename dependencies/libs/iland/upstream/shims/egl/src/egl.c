@@ -1034,8 +1034,60 @@ static EGLSurface zc_pbuffer_for_bo(EGLShimDisplay *sd, EGLShimSurface *ss,
 typedef struct EGLShimImage {
     EGLShimDisplay *sd;
     IOSurfaceRef    io;        /* +1 ref held from IOSurfaceLookup */
-    EGLSurface      pbuffer;   /* ANGLE IOSurface-client-buffer pbuffer */
+    EGLSurface      pbuffer;   /* Apple: ANGLE IOSurface-client-buffer pbuffer */
+    EGLImageKHR     angle_image; /* Android: real ANGLE EGLImage from AHB */
 } EGLShimImage;
+
+#if defined(__ANDROID__)
+/*
+ * Android has no EGL_ANGLE_iosurface_client_buffer (egl.c: the Wayland zerocopy
+ * path notes ANGLE/META-EGL lack it), so the Apple pbuffer import above cannot
+ * work here. Instead import the AHardwareBuffer that backs the iland IOSurface
+ * as a *real* ANGLE EGLImage via EGL_ANDROID_image_native_buffer +
+ * eglGetNativeClientBufferANDROID. The client contract is unchanged
+ * (EGL_LINUX_DMA_BUF_EXT + bit-63 IOSurface modifier); only the platform
+ * substitution beneath it differs, which is the port-faithful thing to do.
+ */
+#ifndef EGL_NATIVE_BUFFER_ANDROID
+#define EGL_NATIVE_BUFFER_ANDROID 0x3140
+#endif
+#ifndef EGL_IMAGE_PRESERVED_KHR
+#define EGL_IMAGE_PRESERVED_KHR 0x30D2
+#endif
+static EGLClientBuffer (*g_eglGetNativeClientBufferANDROID)(const void *) = NULL;
+static EGLImageKHR (*g_real_eglCreateImageKHR)(EGLDisplay, EGLContext, EGLenum,
+                                               EGLClientBuffer, const EGLint *) =
+    NULL;
+static EGLBoolean (*g_real_eglDestroyImageKHR)(EGLDisplay, EGLImageKHR) = NULL;
+static void (*g_real_glEGLImageTargetTexture2DOES)(unsigned int, void *) = NULL;
+
+/* Resolve the AHB-import entry points from ANGLE once. Returns 0 on success. */
+static int android_ahb_import_load(void)
+{
+    if (g_eglGetNativeClientBufferANDROID && g_real_eglCreateImageKHR &&
+        g_real_eglDestroyImageKHR && g_real_glEGLImageTargetTexture2DOES)
+        return 0;
+    if (!real_eglGetProcAddress) return -1;
+    if (!g_eglGetNativeClientBufferANDROID)
+        g_eglGetNativeClientBufferANDROID = (EGLClientBuffer(*)(const void *))
+            real_eglGetProcAddress("eglGetNativeClientBufferANDROID");
+    if (!g_real_eglCreateImageKHR)
+        g_real_eglCreateImageKHR =
+            (EGLImageKHR(*)(EGLDisplay, EGLContext, EGLenum, EGLClientBuffer,
+                            const EGLint *))
+                real_eglGetProcAddress("eglCreateImageKHR");
+    if (!g_real_eglDestroyImageKHR)
+        g_real_eglDestroyImageKHR = (EGLBoolean(*)(EGLDisplay, EGLImageKHR))
+            real_eglGetProcAddress("eglDestroyImageKHR");
+    if (!g_real_glEGLImageTargetTexture2DOES)
+        g_real_glEGLImageTargetTexture2DOES = (void (*)(unsigned int, void *))
+            real_eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    return (g_eglGetNativeClientBufferANDROID && g_real_eglCreateImageKHR &&
+            g_real_eglDestroyImageKHR && g_real_glEGLImageTargetTexture2DOES)
+               ? 0
+               : -1;
+}
+#endif
 
 /* An IOSurface-bindable, texture-renderable config. ANGLE's default display is
  * process-wide, so cache the first match. */
@@ -1100,6 +1152,48 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
         return EGL_NO_IMAGE_KHR;
     }
 
+#if defined(__ANDROID__)
+    {
+        AHardwareBuffer *ahb = ILandIOSurfaceGetHardwareBuffer(io);
+        if (!ahb || android_ahb_import_load() != 0) {
+            fprintf(stderr,
+                    "iland: eglCreateImageKHR: no AHardwareBuffer / ANGLE lacks "
+                    "EGL_ANDROID_image_native_buffer\n");
+            CFRelease(io);
+            return EGL_NO_IMAGE_KHR;
+        }
+        EGLClientBuffer cb = g_eglGetNativeClientBufferANDROID(ahb);
+        if (!cb) {
+            fprintf(stderr,
+                    "iland: eglGetNativeClientBufferANDROID failed\n");
+            CFRelease(io);
+            return EGL_NO_IMAGE_KHR;
+        }
+        const EGLint img_attrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+        EGLImageKHR angle_img = g_real_eglCreateImageKHR(
+            sd->angle_display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, cb,
+            img_attrs);
+        if (angle_img == EGL_NO_IMAGE_KHR) {
+            fprintf(stderr,
+                    "iland: eglCreateImageKHR(NATIVE_BUFFER_ANDROID) failed "
+                    "(0x%04x)\n",
+                    real_eglGetError ? real_eglGetError() : 0);
+            CFRelease(io);
+            return EGL_NO_IMAGE_KHR;
+        }
+        EGLShimImage *img = calloc(1, sizeof(*img));
+        if (!img) {
+            g_real_eglDestroyImageKHR(sd->angle_display, angle_img);
+            CFRelease(io);
+            return EGL_NO_IMAGE_KHR;
+        }
+        img->sd = sd;
+        img->io = io;              /* keeps the AHB alive behind the image */
+        img->pbuffer = EGL_NO_SURFACE;
+        img->angle_image = angle_img;
+        return (EGLImageKHR)img;
+    }
+#else
     EGLConfig config = image_iosurface_config(sd);
     if (!config || !real_eglCreatePbufferFromClientBuffer) {
         CFRelease(io);
@@ -1140,6 +1234,7 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
     img->io = io;
     img->pbuffer = pb;
     return (EGLImageKHR)img;
+#endif
 }
 
 EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
@@ -1147,7 +1242,11 @@ EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
     (void)dpy;
     EGLShimImage *img = (EGLShimImage *)image;
     if (!img) return EGL_FALSE;
-    if (img->sd && img->pbuffer) {
+#if defined(__ANDROID__)
+    if (img->sd && img->angle_image && g_real_eglDestroyImageKHR)
+        g_real_eglDestroyImageKHR(img->sd->angle_display, img->angle_image);
+#endif
+    if (img->sd && img->pbuffer && img->pbuffer != EGL_NO_SURFACE) {
         if (real_eglReleaseTexImage)
             real_eglReleaseTexImage(img->sd->angle_display, img->pbuffer,
                                     EGL_BACK_BUFFER);
@@ -1166,9 +1265,19 @@ EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
  * the same present path kmscube uses. */
 void glEGLImageTargetTexture2DOES(unsigned int target, void *image)
 {
-    (void)target;
     EGLShimImage *img = (EGLShimImage *)image;
-    if (!img || !img->sd || !img->pbuffer || !real_eglBindTexImage) return;
+    if (!img || !img->sd) return;
+#if defined(__ANDROID__)
+    /* Android import is a real ANGLE EGLImage — bind it to the currently bound
+     * texture via ANGLE's own entry point, not the IOSurface pbuffer path. */
+    if (img->angle_image && g_real_glEGLImageTargetTexture2DOES) {
+        g_real_glEGLImageTargetTexture2DOES(target, img->angle_image);
+        return;
+    }
+#endif
+    (void)target;
+    if (!img->pbuffer || img->pbuffer == EGL_NO_SURFACE || !real_eglBindTexImage)
+        return;
     real_eglBindTexImage(img->sd->angle_display, img->pbuffer, EGL_BACK_BUFFER);
 }
 
