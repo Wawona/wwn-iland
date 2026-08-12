@@ -51,4 +51,13 @@ for sym in "${SYMS[@]}"; do
 done
 
 "$OBJCOPY" "${args[@]}" "$out"
+
+# objcopy invalidates the archive symbol index; without a refresh, later nm
+# (install canary) reports the namespaced GLES image entrypoints as missing.
+if command -v llvm-ranlib >/dev/null 2>&1; then
+  llvm-ranlib "$out" 2>/dev/null || true
+elif command -v ranlib >/dev/null 2>&1; then
+  ranlib "$out" 2>/dev/null || true
+fi
+
 echo "rename-angle-symbols: applied ${#SYMS[@]} renames to $(basename "$out")"
