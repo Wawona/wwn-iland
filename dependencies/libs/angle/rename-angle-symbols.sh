@@ -24,16 +24,27 @@ if [ -z "$OBJCOPY" ] || ! command -v "$OBJCOPY" >/dev/null 2>&1; then
   exit 1
 fi
 
-NM="${LLVM_NM:-nm}"
-if ! command -v "$NM" >/dev/null 2>&1; then
-  NM="$(xcrun --find nm 2>/dev/null || true)"
+NM="${LLVM_NM:-}"
+if [ -z "$NM" ] || ! command -v "$NM" >/dev/null 2>&1; then
+  NM="$(xcrun --find llvm-nm 2>/dev/null || true)"
 fi
 if [ -z "$NM" ] || ! command -v "$NM" >/dev/null 2>&1; then
-  echo "ERROR: nm not found" >&2
+  NM="$(command -v nm || true)"
+fi
+if [ -z "$NM" ]; then
+  echo "ERROR: nm/llvm-nm not found" >&2
   exit 1
 fi
 
 cp "$in" "$out"
+
+# Materialized archives from llvm-ar -M may lack a symbol index; nm then
+# reports nothing and we would skip the rename (visionOS GLESv2 footgun).
+if command -v llvm-ranlib >/dev/null 2>&1; then
+  llvm-ranlib "$out" 2>/dev/null || true
+elif command -v ranlib >/dev/null 2>&1; then
+  ranlib "$out" 2>/dev/null || true
+fi
 
 SYMS=(
   eglGetDisplay eglInitialize eglTerminate eglGetError eglQueryString
@@ -47,15 +58,28 @@ SYMS=(
   eglGetPlatformDisplay eglGetPlatformDisplayEXT
   # EGL_KHR_image / GLES OES_EGL_image — force-loaded static ANGLE on visionOS
   # collided with iland's IOSurface dma_buf shim (`ld: duplicate symbol`).
-  # Namespace ANGLE's copies the same way as the rest of the public EGL surface.
   eglCreateImageKHR eglDestroyImageKHR
   eglCreateImage eglDestroyImage
   glEGLImageTargetTexture2DOES
 )
 
-# Defined globals in this archive (text + data + weak). Skip names absent
-# here so the same script is safe on both libEGL.a and libGLESv2.a.
-defined="$("$NM" -gU "$out" 2>/dev/null | awk '{ print $3 }' | sort -u)"
+# List defined globals. Prefer --defined-only (llvm-nm); BSD nm uses -U for the
+# same meaning (llvm-nm's -U is the opposite — undefined-only). Use $NF so both
+# `ADDR T _sym` and `---------------- T _sym` formats work.
+list_defined() {
+  local archive="$1"
+  if "$NM" --defined-only -g "$archive" >/dev/null 2>&1; then
+    "$NM" --defined-only -g "$archive" 2>/dev/null | awk '{ print $NF }'
+  else
+    "$NM" -gU "$archive" 2>/dev/null | awk '{ print $NF }'
+  fi
+}
+
+defined="$(list_defined "$out" | sort -u)"
+if [ -z "$defined" ]; then
+  echo "ERROR: nm found no defined symbols in $in (cannot rename)" >&2
+  exit 1
+fi
 
 args=()
 for sym in "${SYMS[@]}"; do

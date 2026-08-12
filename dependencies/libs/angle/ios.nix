@@ -203,6 +203,16 @@ else
         "$TMPDIR/libEGL-materialized.a" $out/lib/libEGL.a
       ${pkgs.bash}/bin/bash ${./rename-angle-symbols.sh} \
         "$TMPDIR/libGLESv2-materialized.a" $out/lib/libGLESv2.a
+      # Canary: visionOS Ld collides if these remain public beside the shim.
+      for sym in eglCreateImageKHR eglDestroyImageKHR glEGLImageTargetTexture2DOES; do
+        if nm -g --defined-only $out/lib/libEGL.a $out/lib/libGLESv2.a 2>/dev/null \
+             | awk '{ print $NF }' | grep -qx "_$sym"; then
+          echo "ERROR: public _$sym still exported after rename-angle-symbols" >&2
+          nm -g --defined-only $out/lib/libEGL.a $out/lib/libGLESv2.a \
+            | grep "_$sym" >&2 || true
+          exit 1
+        fi
+      done
       cp -rv include/EGL include/GLES2 include/GLES3 include/KHR $out/include/
       echo static > $out/nix-support/link-kind
       cat > $out/nix-support/angle-build-metadata.json <<'EOF'
