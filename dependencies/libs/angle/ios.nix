@@ -196,9 +196,13 @@ else
           done
         printf 'SAVE\nEND\n'
       } | "$LLVM_AR" -M
-      install -m644 "$TMPDIR/libGLESv2-materialized.a" $out/lib/libGLESv2.a
+      # Namespace ANGLE's public EGL/GLES entry points that iland's shim also
+      # exports, so a -force_load of both archives is one definition each —
+      # not weak coexistence. Same script on both archives (skips missing).
       ${pkgs.bash}/bin/bash ${./rename-angle-symbols.sh} \
         "$TMPDIR/libEGL-materialized.a" $out/lib/libEGL.a
+      ${pkgs.bash}/bin/bash ${./rename-angle-symbols.sh} \
+        "$TMPDIR/libGLESv2-materialized.a" $out/lib/libGLESv2.a
       cp -rv include/EGL include/GLES2 include/GLES3 include/KHR $out/include/
       echo static > $out/nix-support/link-kind
       cat > $out/nix-support/angle-build-metadata.json <<'EOF'
