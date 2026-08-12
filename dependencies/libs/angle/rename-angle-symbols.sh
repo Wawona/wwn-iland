@@ -2,10 +2,10 @@
 # Keep iland's public EGL/GLES shim and statically linked ANGLE in one link
 # unit by namespacing ANGLE's public entry points that the shim also exports.
 #
-# Applied to both libEGL.a and libGLESv2.a. llvm-objcopy --redefine-sym is a
-# no-op for names absent from the archive, so we apply the full known set
-# without an nm pre-filter (nm on freshly llvm-ar -M'd GLESv2 archives was
-# missing glEGLImageTargetTexture2DOES in the nix sandbox and left it public).
+# Applied to both libEGL.a and libGLESv2.a. Whole-archive llvm-objcopy
+# --redefine-sym is unreliable on Mach-O .a files in the nix sandbox (it can
+# exit 0 while leaving glEGLImageTargetTexture2DOES public). Extract each
+# member (xN for duplicate basenames), rename the object, then re-ar + ranlib.
 set -euo pipefail
 
 if [ "$#" -ne 2 ]; then
@@ -15,22 +15,33 @@ fi
 
 in="$1"
 out="$2"
-OBJCOPY="${LLVM_OBJCOPY:-llvm-objcopy}"
-if ! command -v "$OBJCOPY" >/dev/null 2>&1; then
-  OBJCOPY="$(xcrun --find llvm-objcopy 2>/dev/null || true)"
-fi
-if [ -z "$OBJCOPY" ] || ! command -v "$OBJCOPY" >/dev/null 2>&1; then
+
+resolve_tool() {
+  local env_name="$1" fallback="$2" xcrun_name="$3"
+  local v="${!env_name:-}"
+  if [ -n "$v" ] && command -v "$v" >/dev/null 2>&1; then
+    printf '%s\n' "$v"
+    return
+  fi
+  if command -v "$fallback" >/dev/null 2>&1; then
+    printf '%s\n' "$fallback"
+    return
+  fi
+  local xc
+  xc="$(xcrun --find "$xcrun_name" 2>/dev/null || true)"
+  if [ -n "$xc" ] && command -v "$xc" >/dev/null 2>&1; then
+    printf '%s\n' "$xc"
+    return
+  fi
+  return 1
+}
+
+OBJCOPY="$(resolve_tool LLVM_OBJCOPY llvm-objcopy llvm-objcopy)" || {
   echo "ERROR: llvm-objcopy not found (set LLVM_OBJCOPY)" >&2
   exit 1
-fi
-
-cp "$in" "$out"
-
-if command -v llvm-ranlib >/dev/null 2>&1; then
-  llvm-ranlib "$out" 2>/dev/null || true
-elif command -v ranlib >/dev/null 2>&1; then
-  ranlib "$out" 2>/dev/null || true
-fi
+}
+AR="$(resolve_tool LLVM_AR llvm-ar llvm-ar)" || AR=ar
+RANLIB="$(resolve_tool LLVM_RANLIB llvm-ranlib llvm-ranlib)" || RANLIB=ranlib
 
 SYMS=(
   eglGetDisplay eglInitialize eglTerminate eglGetError eglQueryString
@@ -50,14 +61,52 @@ for sym in "${SYMS[@]}"; do
   args+=(--redefine-sym "_${sym}=_angle_${sym}")
 done
 
-"$OBJCOPY" "${args[@]}" "$out"
-
-# objcopy invalidates the archive symbol index; without a refresh, later nm
-# (install canary) reports the namespaced GLES image entrypoints as missing.
-if command -v llvm-ranlib >/dev/null 2>&1; then
-  llvm-ranlib "$out" 2>/dev/null || true
-elif command -v ranlib >/dev/null 2>&1; then
-  ranlib "$out" 2>/dev/null || true
+# Non-archive: rename a single Mach-O object.
+if ! "$AR" t "$in" >/dev/null 2>&1; then
+  cp "$in" "$out"
+  "$OBJCOPY" "${args[@]}" "$out"
+  echo "rename-angle-symbols: applied ${#SYMS[@]} renames to $(basename "$out")"
+  exit 0
 fi
 
-echo "rename-angle-symbols: applied ${#SYMS[@]} renames to $(basename "$out")"
+work="$(mktemp -d "${TMPDIR:-/tmp}/rename-angle-XXXXXX")"
+cleanup() { rm -rf "$work"; }
+trap cleanup EXIT
+
+cp "$in" "$work/in.a"
+mkdir "$work/members" "$work/extract"
+
+# Occurrence count per basename so xN pulls the right duplicate.
+declare -A seen=()
+idx=0
+while IFS= read -r member; do
+  case "$member" in
+    __.SYMDEF*|__/|/) continue ;;
+  esac
+  seen["$member"]=$((${seen["$member"]:-0} + 1))
+  n=${seen["$member"]}
+  idx=$((idx + 1))
+  dest="$work/members/$(printf '%05d' "$idx").o"
+  (
+    cd "$work/extract"
+    rm -f -- "$member"
+    "$AR" xN "$n" "$work/in.a" "$member"
+    if [ ! -f "$member" ]; then
+      echo "ERROR: failed to extract [$n] $member from $in" >&2
+      exit 1
+    fi
+    mv -- "$member" "$dest"
+  )
+  # redefine-sym is a no-op for absent names; ignore non-Mach-O members.
+  "$OBJCOPY" "${args[@]}" "$dest" 2>/dev/null || true
+done < <("$AR" t "$work/in.a")
+if [ "$idx" -eq 0 ]; then
+  echo "ERROR: empty archive: $in" >&2
+  exit 1
+fi
+
+rm -f "$out"
+"$AR" rc "$out" "$work"/members/*
+"$RANLIB" "$out"
+
+echo "rename-angle-symbols: processed ${idx} members (${#SYMS[@]} redefine-sym) -> $(basename "$out")"
