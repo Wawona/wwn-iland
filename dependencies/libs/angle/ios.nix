@@ -185,17 +185,13 @@ else
         exit 1
       fi
       LLVM_AR=$(command -v llvm-ar)
+      # Materialize both static archives the same way. Packing every .o under
+      # out/ (old GLESv2 path) produced a ~200MB fat archive that sandbox
+      # llvm-nm could not list, so the rename canary false-failed.
       printf 'CREATE %s\nADDLIB %s\nSAVE\nEND\n' \
         "$TMPDIR/libEGL-materialized.a" "$EGL_ARCHIVE" | "$LLVM_AR" -M
-      {
-        printf 'CREATE %s\n' "$TMPDIR/libGLESv2-materialized.a"
-        find "$OUT_DIR" -type f -name '*.o' \
-          ! -path '*/libEGL_static/*' -print | LC_ALL=C sort |
-          while IFS= read -r object; do
-            printf 'ADDMOD %s/%s\n' "$PWD" "$object"
-          done
-        printf 'SAVE\nEND\n'
-      } | "$LLVM_AR" -M
+      printf 'CREATE %s\nADDLIB %s\nSAVE\nEND\n' \
+        "$TMPDIR/libGLESv2-materialized.a" "$GLES_ARCHIVE" | "$LLVM_AR" -M
       # Namespace ANGLE's public EGL/GLES entry points that iland's shim also
       # exports, so a -force_load of both archives is one definition each —
       # not weak coexistence. Same script on both archives (skips missing).
@@ -204,17 +200,16 @@ else
       ${pkgs.bash}/bin/bash ${./rename-angle-symbols.sh} \
         "$TMPDIR/libGLESv2-materialized.a" $out/lib/libGLESv2.a
       # Canary: visionOS Ld collides if these remain public beside the shim.
-      # Prefer llvm-nm --defined-only; never use bare -U with llvm-nm (that
-      # flag means undefined-only there, the opposite of BSD nm).
+      # Prefer BSD nm -gU (Xcode); never use bare -U with llvm-nm (that flag
+      # means undefined-only there, the opposite of BSD nm).
       list_defined() {
         local archive="$1"
-        if command -v llvm-nm >/dev/null 2>&1; then
-          llvm-nm --defined-only -g "$archive" 2>/dev/null || true
-        elif nm --defined-only -g "$archive" >/dev/null 2>&1; then
-          nm --defined-only -g "$archive" 2>/dev/null || true
-        else
-          # BSD nm: -U = defined-only
+        if nm -gU "$archive" >/dev/null 2>&1; then
           nm -gU "$archive" 2>/dev/null || true
+        elif command -v llvm-nm >/dev/null 2>&1; then
+          llvm-nm --defined-only -g "$archive" 2>/dev/null || true
+        else
+          nm --defined-only -g "$archive" 2>/dev/null || true
         fi
       }
       for archive in $out/lib/libEGL.a $out/lib/libGLESv2.a; do
@@ -230,6 +225,8 @@ else
       if ! list_defined $out/lib/libGLESv2.a | awk '{ print $NF }' \
            | grep -qx "_angle_glEGLImageTargetTexture2DOES"; then
         echo "ERROR: _angle_glEGLImageTargetTexture2DOES missing from libGLESv2.a" >&2
+        echo "--- nm sample (EGLImage) ---" >&2
+        list_defined $out/lib/libGLESv2.a | grep -i EGLImage | head -n 40 >&2 || true
         exit 1
       fi
       cp -rv include/EGL include/GLES2 include/GLES3 include/KHR $out/include/
