@@ -204,17 +204,34 @@ else
       ${pkgs.bash}/bin/bash ${./rename-angle-symbols.sh} \
         "$TMPDIR/libGLESv2-materialized.a" $out/lib/libGLESv2.a
       # Canary: visionOS Ld collides if these remain public beside the shim.
-      list_public() {
-        nm -g --defined-only "$@" 2>/dev/null || nm -gU "$@" 2>/dev/null
-      }
-      for sym in eglCreateImageKHR eglDestroyImageKHR glEGLImageTargetTexture2DOES; do
-        if list_public $out/lib/libEGL.a $out/lib/libGLESv2.a \
-             | awk '{ print $NF }' | grep -qx "_$sym"; then
-          echo "ERROR: public _$sym still exported after rename-angle-symbols" >&2
-          list_public $out/lib/libEGL.a $out/lib/libGLESv2.a | grep "_$sym" >&2 || true
-          exit 1
+      # Prefer llvm-nm --defined-only; never use bare -U with llvm-nm (that
+      # flag means undefined-only there, the opposite of BSD nm).
+      list_defined() {
+        local archive="$1"
+        if command -v llvm-nm >/dev/null 2>&1; then
+          llvm-nm --defined-only -g "$archive" 2>/dev/null || true
+        elif nm --defined-only -g "$archive" >/dev/null 2>&1; then
+          nm --defined-only -g "$archive" 2>/dev/null || true
+        else
+          # BSD nm: -U = defined-only
+          nm -gU "$archive" 2>/dev/null || true
         fi
+      }
+      for archive in $out/lib/libEGL.a $out/lib/libGLESv2.a; do
+        for sym in eglCreateImageKHR eglDestroyImageKHR glEGLImageTargetTexture2DOES; do
+          if list_defined "$archive" | awk '{ print $NF }' | grep -qx "_$sym"; then
+            echo "ERROR: public _$sym still in $archive after rename" >&2
+            list_defined "$archive" | grep "_$sym" >&2 || true
+            exit 1
+          fi
+        done
       done
+      # Positive check: GLESv2 must own the namespaced image entrypoint.
+      if ! list_defined $out/lib/libGLESv2.a | awk '{ print $NF }' \
+           | grep -qx "_angle_glEGLImageTargetTexture2DOES"; then
+        echo "ERROR: _angle_glEGLImageTargetTexture2DOES missing from libGLESv2.a" >&2
+        exit 1
+      fi
       cp -rv include/EGL include/GLES2 include/GLES3 include/KHR $out/include/
       echo static > $out/nix-support/link-kind
       cat > $out/nix-support/angle-build-metadata.json <<'EOF'
