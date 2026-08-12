@@ -76,7 +76,7 @@ trap cleanup EXIT
 cp "$in" "$work/in.a"
 mkdir "$work/members" "$work/extract"
 
-# Occurrence count per basename so xN pulls the right duplicate.
+# Occurrence count per TOC name so xN pulls the right duplicate.
 declare -A seen=()
 idx=0
 while IFS= read -r member; do
@@ -87,19 +87,33 @@ while IFS= read -r member; do
   n=${seen["$member"]}
   idx=$((idx + 1))
   dest="$work/members/$(printf '%05d' "$idx").o"
+  base="$(basename "$member")"
   (
     cd "$work/extract"
-    rm -f -- "$member"
-    "$AR" xN "$n" "$work/in.a" "$member"
-    if [ ! -f "$member" ]; then
+    rm -rf -- ./*
+    # Path-prefixed TOC names often extract as basename-only; try both.
+    if ! "$AR" xN "$n" "$work/in.a" "$member" 2>/dev/null; then
+      "$AR" xN "$n" "$work/in.a" "$base"
+    fi
+    extracted=""
+    if [ -f "$member" ]; then
+      extracted="$member"
+    elif [ -f "$base" ]; then
+      extracted="$base"
+    else
+      extracted="$(find . -type f -name "$base" | head -n 1 || true)"
+    fi
+    if [ -z "$extracted" ] || [ ! -f "$extracted" ]; then
       echo "ERROR: failed to extract [$n] $member from $in" >&2
+      find . -type f | head >&2 || true
       exit 1
     fi
-    mv -- "$member" "$dest"
+    mv -- "$extracted" "$dest"
   )
   # redefine-sym is a no-op for absent names; ignore non-Mach-O members.
   "$OBJCOPY" "${args[@]}" "$dest" 2>/dev/null || true
 done < <("$AR" t "$work/in.a")
+
 if [ "$idx" -eq 0 ]; then
   echo "ERROR: empty archive: $in" >&2
   exit 1
