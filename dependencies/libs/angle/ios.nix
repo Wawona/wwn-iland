@@ -214,19 +214,20 @@ else
       }
       for archive in $out/lib/libEGL.a $out/lib/libGLESv2.a; do
         for sym in eglCreateImageKHR eglDestroyImageKHR glEGLImageTargetTexture2DOES; do
-          if list_defined "$archive" | awk '{ print $NF }' | grep -qx "_$sym"; then
+          # Match as a whole nm field (avoid awk+$NF; some nm lines confuse -qx).
+          if list_defined "$archive" | grep -E "[[:space:]]_${sym}$" >/dev/null; then
             echo "ERROR: public _$sym still in $archive after rename" >&2
-            list_defined "$archive" | grep "_$sym" >&2 || true
+            list_defined "$archive" | grep -E "_${sym}" >&2 || true
             exit 1
           fi
         done
       done
       # Positive check: GLESv2 must own the namespaced image entrypoint.
-      if ! list_defined $out/lib/libGLESv2.a | awk '{ print $NF }' \
-           | grep -qx "_angle_glEGLImageTargetTexture2DOES"; then
+      if ! list_defined "$out/lib/libGLESv2.a" \
+           | grep -E '[[:space:]]_angle_glEGLImageTargetTexture2DOES$' >/dev/null; then
         echo "ERROR: _angle_glEGLImageTargetTexture2DOES missing from libGLESv2.a" >&2
         echo "--- nm sample (EGLImage) ---" >&2
-        list_defined $out/lib/libGLESv2.a | grep -i EGLImage | head -n 40 >&2 || true
+        list_defined "$out/lib/libGLESv2.a" | grep -i EGLImage | head -n 40 >&2 || true
         exit 1
       fi
       cp -rv include/EGL include/GLES2 include/GLES3 include/KHR $out/include/
