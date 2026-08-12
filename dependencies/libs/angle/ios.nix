@@ -185,13 +185,20 @@ else
         exit 1
       fi
       LLVM_AR=$(command -v llvm-ar)
-      # Materialize both static archives the same way. Packing every .o under
-      # out/ (old GLESv2 path) produced a ~200MB fat archive that sandbox
-      # llvm-nm could not list, so the rename canary false-failed.
+      # EGL is a small static archive (ADDLIB is enough). GLESv2's
+      # libGLESv2_static.a is thin / one-member in this GN layout — ADDLIB
+      # alone drops the real objects — so re-pack every non-EGL .o under out/.
       printf 'CREATE %s\nADDLIB %s\nSAVE\nEND\n' \
         "$TMPDIR/libEGL-materialized.a" "$EGL_ARCHIVE" | "$LLVM_AR" -M
-      printf 'CREATE %s\nADDLIB %s\nSAVE\nEND\n' \
-        "$TMPDIR/libGLESv2-materialized.a" "$GLES_ARCHIVE" | "$LLVM_AR" -M
+      {
+        printf 'CREATE %s\n' "$TMPDIR/libGLESv2-materialized.a"
+        find "$OUT_DIR" -type f -name '*.o' \
+          ! -path '*/libEGL_static/*' -print | LC_ALL=C sort |
+          while IFS= read -r object; do
+            printf 'ADDMOD %s/%s\n' "$PWD" "$object"
+          done
+        printf 'SAVE\nEND\n'
+      } | "$LLVM_AR" -M
       # Namespace ANGLE's public EGL/GLES entry points that iland's shim also
       # exports, so a -force_load of both archives is one definition each —
       # not weak coexistence. Same script on both archives (skips missing).
