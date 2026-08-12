@@ -1170,6 +1170,15 @@ static EGLConfig image_iosurface_config(EGLShimDisplay *sd)
     return cached;
 }
 
+/* WEAK so the shim coexists with a *statically* linked ANGLE. On iOS/Android
+ * ANGLE is a dylib and this shim's strong static def is the sole link-time
+ * provider, so the iland IOSurface dma_buf path is used. On visionOS ANGLE
+ * ships as libEGL.a and is -force_load'd alongside libiland_userland.a; ANGLE
+ * already exports eglCreateImageKHR/eglDestroyImageKHR/glEGLImageTargetTexture2DOES,
+ * so a strong shim def collides (`ld: duplicate symbol`). Marking the shim's
+ * copies weak lets ANGLE's strong static defs win there (no collision) while
+ * keeping them authoritative wherever ANGLE is a dylib. */
+__attribute__((weak))
 EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
                               EGLClientBuffer buffer, const EGLint *attrib_list)
 {
@@ -1326,6 +1335,8 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
 #endif
 }
 
+/* weak: see eglCreateImageKHR above (static-ANGLE coexistence on visionOS). */
+__attribute__((weak))
 EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
 {
     (void)dpy;
@@ -1354,6 +1365,8 @@ EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
  * client-buffer textures are colour-renderable, so the demo can attach the
  * resulting texture to an FBO and render straight into the scanout IOSurface —
  * the same present path kmscube uses. */
+/* weak: see eglCreateImageKHR above (static-ANGLE coexistence on visionOS). */
+__attribute__((weak))
 void glEGLImageTargetTexture2DOES(unsigned int target, void *image)
 {
     EGLShimImage *img = (EGLShimImage *)image;
