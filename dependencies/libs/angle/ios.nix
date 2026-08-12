@@ -215,9 +215,10 @@ else
       for archive in $out/lib/libEGL.a $out/lib/libGLESv2.a; do
         for sym in eglCreateImageKHR eglDestroyImageKHR glEGLImageTargetTexture2DOES; do
           # Match as a whole nm field (avoid awk+$NF; some nm lines confuse -qx).
-          if list_defined "$archive" | grep -E "[[:space:]]_${sym}$" >/dev/null; then
+          # ''${ keeps ${sym} for bash — Nix would otherwise interpolate it.
+          if list_defined "$archive" | grep -E "[[:space:]]_''${sym}$" >/dev/null; then
             echo "ERROR: public _$sym still in $archive after rename" >&2
-            list_defined "$archive" | grep -E "_${sym}" >&2 || true
+            list_defined "$archive" | grep -E "_''${sym}" >&2 || true
             exit 1
           fi
         done
