@@ -1,5 +1,7 @@
 # wwn-iland
 
+[![CI](https://github.com/Wawona/wwn-iland/actions/workflows/ci.yml/badge.svg)](https://github.com/Wawona/wwn-iland/actions/workflows/ci.yml)
+
 Wawona's userland Linux-graphics compatibility layer: GBM / EGL / DRM-KMS over
 Apple `IOSurface` + ANGLE, providing the "Mode A" in-window present path that
 stays inside the host app for Wayland/Weston GL clients
