@@ -13,7 +13,7 @@ static int g_init;
 
 static void ensure(void) {
     if (g_init) return;
-    g_entry.name = "card0";
+    g_entry.name = "/sys/devices/virtual/drm/card0";
     g_entry.next = NULL;
     g_dev.refcount = 1;
     g_dev.monitor_pipe_r = -1;
@@ -83,7 +83,7 @@ const char *udev_device_get_sysattr_value(struct udev_device *d, const char *a) 
 }
 
 const char *udev_device_get_property_value(struct udev_device *d, const char *k) {
-    (void)k;
+    if (k && strcmp(k, "ID_SEAT") == 0) return "seat0";
     return d ? d->property_val : NULL;
 }
 

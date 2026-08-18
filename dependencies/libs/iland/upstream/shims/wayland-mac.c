@@ -331,7 +331,7 @@ static void install_drm_hooks(void)
 
 __attribute__((constructor))
 static void wayland_mac_load(void) {
-    if (getuid() != 0) {
+    if (geteuid() != 0) {
         fprintf(stderr, "[wayland-mac] must run as root\n");
         abort();
         return;
