@@ -303,9 +303,6 @@ int main(void)
         *(void **)(fake_sub_object + 0xD0) = fake_event_data;
         *(void **)(fake_event_data + 0xA0) = fake_event_caps;
 
-        fn_DispDrvInit();
-        fprintf(stderr, "[framebufferd] CoreDisplay initialised\n");
-
         /* ── Create CAWindowServer instance ─────────────────────────── */
         Class caWS = NSClassFromString(@"CAWindowServer");
         if (p_shared_server) *p_shared_server = NULL;
@@ -325,6 +322,9 @@ int main(void)
         }
         printf("[framebufferd] CAWindowServer ready, display=%s\n",
                g_display ? "yes" : "no");
+
+        fn_DispDrvInit();
+        fprintf(stderr, "[framebufferd] CoreDisplay initialised\n");
 
         /* ── Start Mach server thread ───────────────────────────────── */
         pthread_t thread;
