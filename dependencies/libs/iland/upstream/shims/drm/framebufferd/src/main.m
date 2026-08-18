@@ -317,8 +317,12 @@ int main(void)
 
         if (p_g_server) *p_g_server = (__bridge void *)server;
 
-        NSArray *displays = (NSArray *)[server performSelector:NSSelectorFromString(@"displays")];
-        g_display = [displays firstObject];
+        void *impl = NULL;
+        object_getInstanceVariable(server, "_impl", &impl);
+        if (impl) {
+            NSArray *displays = (__bridge NSArray *)(*(void **)impl);
+            g_display = [displays firstObject];
+        }
         printf("[framebufferd] CAWindowServer ready, display=%s\n",
                g_display ? "yes" : "no");
 
