@@ -39,7 +39,7 @@ add_subdirectory(shims/udev)
 add_library(wayland-mac SHARED shims/wayland-mac.c)
 
 target_link_libraries(wayland-mac PRIVATE
-  -Wl,-force_load,$<TARGET_FILE:dobby>
+  -Wl,-force_load,$<TARGET_FILE:dobby_static>
   -Wl,-force_load,$<TARGET_FILE:epoll-shim-interpose>
   -Wl,-force_load,$<TARGET_FILE:glibc-compat>
   -Wl,-force_load,$<TARGET_FILE:wayland>
@@ -54,7 +54,7 @@ target_link_libraries(wayland-mac PRIVATE
 # Shim-specific headers (epoll, drm) are propagated transitively through
 # each library target's PUBLIC include directories.
 target_link_libraries(wayland-mac PUBLIC drm gbm egl-shim)
-target_link_libraries(wayland-mac PRIVATE "-framework Foundation" "-lobjc")
+target_link_libraries(wayland-mac PRIVATE "-framework Foundation" "-lobjc" "-lc++")
 target_include_directories(wayland-mac PRIVATE
   ${CMAKE_SOURCE_DIR}/shims/epoll/src
 )
@@ -75,7 +75,7 @@ target_link_options(wayland-mac PRIVATE
 
 add_dependencies(wayland-mac
   epoll-shim-interpose
-  dobby
+  dobby_static
   drm
   gbm
   egl-shim
