@@ -342,33 +342,17 @@ int main(void)
         CFRunLoopAddSource(g_main_run_loop, g_present_source,
                            kCFRunLoopCommonModes);
 
-        CVDisplayLinkRef display_link = NULL;
-        CVReturn link_status =
-            CVDisplayLinkCreateWithActiveCGDisplays(&display_link);
-        if (link_status == kCVReturnSuccess) {
-            CVDisplayLinkSetOutputCallback(display_link, DisplayLinkCallback,
-                                           NULL);
-            link_status = CVDisplayLinkStart(display_link);
-        }
-
-        CFRunLoopTimerRef fallback_timer = NULL;
-        if (link_status != kCVReturnSuccess) {
-            fallback_timer = CFRunLoopTimerCreate(
-                kCFAllocatorDefault, CFAbsoluteTimeGetCurrent(), 1.0 / 60,
-                0, 0, TimerCallback, NULL);
-            CFRunLoopAddTimer(g_main_run_loop, fallback_timer,
-                              kCFRunLoopCommonModes);
-            fprintf(stderr,
-                    "[framebufferd] CVDisplayLink unavailable; using 60Hz fallback\n");
-        }
+        CFRunLoopTimerRef fallback_timer = CFRunLoopTimerCreate(
+            kCFAllocatorDefault, CFAbsoluteTimeGetCurrent(), 1.0 / 60,
+            0, 0, TimerCallback, NULL);
+        CFRunLoopAddTimer(g_main_run_loop, fallback_timer,
+                          kCFRunLoopCommonModes);
+        fprintf(stderr,
+                "[framebufferd] CVDisplayLink disabled; using 60Hz fallback\n");
 
         printf("[framebufferd] direct-present mode (zero-copy, host vsync)\n");
         CFRunLoopRun();
 
-        if (display_link) {
-            CVDisplayLinkStop(display_link);
-            CVDisplayLinkRelease(display_link);
-        }
         if (fallback_timer) CFRelease(fallback_timer);
         CFRunLoopRemoveSource(g_main_run_loop, g_present_source,
                               kCFRunLoopCommonModes);
