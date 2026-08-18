@@ -11,7 +11,6 @@
 #include <signal.h>
 
 #import <Foundation/Foundation.h>
-#import <CoreVideo/CoreVideo.h>
 #import <QuartzCore/QuartzCore.h>
 #import <IOSurface/IOSurface.h>
 #import <objc/message.h>
@@ -110,20 +109,25 @@ static void PresentSourcePerform(void *info)
     TimerCallback(NULL, NULL);
 }
 
-static CVReturn DisplayLinkCallback(CVDisplayLinkRef displayLink,
-                                    const CVTimeStamp *now,
-                                    const CVTimeStamp *outputTime,
-                                    CVOptionFlags flagsIn,
-                                    CVOptionFlags *flagsOut,
-                                    void *context)
+/*
+ * Wake the present run loop from the Mach server thread.  Thread-safe:
+ * CFRunLoopSourceSignal + CFRunLoopWakeUp are the supported cross-thread
+ * kick.  Do not call CVDisplayLink / CADisplayLink from this process.
+ *
+ * Those APIs are WindowServer *clients*.  They enumerate displays through
+ * SLSGetActiveDisplayList / CGGetActiveDisplayList and sample VBL through
+ * SLSDisplayGetCurrentVBLDelta (Mozilla 1759232: CoreVideo's IO thread
+ * polls _CGSGetRealtimeDisplayDataShmemPort).  After this process has
+ * become CAWindowServer, CGSRunningInServer() is true and those client
+ * entry points assert.  A CFRunLoopTimer is the in-server cadence; the
+ * CAWindowServerDisplay presentSurface path still waits for host vblank.
+ */
+static void request_present(void)
 {
-    (void)displayLink; (void)now; (void)outputTime;
-    (void)flagsIn; (void)flagsOut; (void)context;
     if (g_present_source && g_main_run_loop) {
         CFRunLoopSourceSignal(g_present_source);
         CFRunLoopWakeUp(g_main_run_loop);
     }
-    return kCVReturnSuccess;
 }
 
 /* ── Mach message server thread ────────────────────────────────────────── */
@@ -177,6 +181,7 @@ static void *mach_server_thread(void *arg)
             g_present_reply_port = msg.header.msgh_remote_port;
             g_dirty = true;
             pthread_mutex_unlock(&g_surface_lock);
+            request_present();
         } else {
             if (client_surface) CFRelease(client_surface);
         }
@@ -326,13 +331,10 @@ int main(void)
         fn_DispDrvInit();
         fprintf(stderr, "[framebufferd] CoreDisplay initialised\n");
 
-        /* ── Start Mach server thread ───────────────────────────────── */
-        pthread_t thread;
-        pthread_create(&thread, NULL, mach_server_thread, NULL);
-        pthread_detach(thread);
-
-        /* Host-vsync source. Presentation stays on the main thread while the
-         * display-link callback only signals the run loop. */
+        /* Present source + 60Hz fallback *before* the Mach thread, so a flip
+         * that arrives during init can wake the run loop instead of waiting
+         * for the first timer fire.  Do not use CVDisplayLink here: that is
+         * a WindowServer client API and asserts once we are the server. */
         g_main_run_loop = CFRunLoopGetCurrent();
         CFRetain(g_main_run_loop);
         CFRunLoopSourceContext source_context = {0};
@@ -348,7 +350,13 @@ int main(void)
         CFRunLoopAddTimer(g_main_run_loop, fallback_timer,
                           kCFRunLoopCommonModes);
         fprintf(stderr,
-                "[framebufferd] CVDisplayLink disabled; using 60Hz fallback\n");
+                "[framebufferd] in-server present: Mach kick + 60Hz timer "
+                "(CVDisplayLink is a client API; not used)\n");
+
+        /* ── Start Mach server thread ───────────────────────────────── */
+        pthread_t thread;
+        pthread_create(&thread, NULL, mach_server_thread, NULL);
+        pthread_detach(thread);
 
         printf("[framebufferd] direct-present mode (zero-copy, host vsync)\n");
         CFRunLoopRun();
