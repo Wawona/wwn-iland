@@ -31,12 +31,15 @@ CAWindowServer / presentSurface** (session-only bootout; never sticky
 
 - Legacy `bootstrap_register` after WS bootout fails (`kr=124` / `kr=141`).
 - A name registered with `bootstrap_register` *before* WS unload becomes
-  `bootstrap_look_up` **"exception protected"** after WS is gone (2026-08-21
-  blank: Output+CoreDisplay ok, `presentSurface` never ran).
+  `bootstrap_look_up` **"exception protected"** after WS is gone.
+- Even **launchd MachServices** + `bootstrap_check_in` still fails look_up
+  from the compositor when it inherits a dead Aqua **session bootstrap
+  subset** (`KERN_EXCEPTION_PROTECTED` / 32). Fix: drm/libinput walk
+  `bootstrap_parent` to the root and look_up again (`drm_bootstrap_look_up`).
 
 Classic therefore publishes via **launchd MachServices** +
-`bootstrap_check_in` (system bootstrap survives WS), with
-`WWN_MODEB_DEFER_DISPLAY=1`:
+`bootstrap_check_in`, with `WWN_MODEB_DEFER_DISPLAY=1`, and the compositor
+resolves the name via parent bootstrap walk:
 
 1. Extract helpers from `libwayland-mac.dylib` while Aqua is up
 2. `launchctl bootstrap` `com.wayland-mac.framebufferd` /

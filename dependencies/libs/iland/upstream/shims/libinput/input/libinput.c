@@ -298,10 +298,36 @@ static void queue_event(struct libinput_event *ev)
 
 /* ── Connect to inputd via Mach IPC ──────────────────────────────────── */
 
+static kern_return_t input_bootstrap_look_up(const char *name, mach_port_t *out)
+{
+    mach_port_t bp = bootstrap_port;
+    kern_return_t kr = bootstrap_look_up(bp, (char *)name, out);
+    if (kr == KERN_SUCCESS)
+        return kr;
+    for (int depth = 1; depth <= 8; depth++) {
+        mach_port_t parent = MACH_PORT_NULL;
+        kern_return_t pkr = bootstrap_parent(bp, &parent);
+        if (pkr != KERN_SUCCESS || parent == MACH_PORT_NULL || parent == bp)
+            break;
+        if (bp != bootstrap_port)
+            mach_port_deallocate(mach_task_self(), bp);
+        bp = parent;
+        kr = bootstrap_look_up(bp, (char *)name, out);
+        if (kr == KERN_SUCCESS) {
+            if (bp != bootstrap_port)
+                mach_port_deallocate(mach_task_self(), bp);
+            return KERN_SUCCESS;
+        }
+    }
+    if (bp != bootstrap_port)
+        mach_port_deallocate(mach_task_self(), bp);
+    return kr;
+}
+
 static int connect_inputd(void)
 {
-    kern_return_t kr = bootstrap_look_up(bootstrap_port, INPUT_IPC_SERVICE_NAME,
-                                         &g.inputd_port);
+    kern_return_t kr = input_bootstrap_look_up(INPUT_IPC_SERVICE_NAME,
+                                                &g.inputd_port);
     if (kr != KERN_SUCCESS) {
         fprintf(stderr, "[libinput] inputd not available (%s), using stub\n",
                 mach_error_string(kr));

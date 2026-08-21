@@ -12,6 +12,46 @@ static mach_port_t g_cached_port = MACH_PORT_NULL;
 static mach_port_t g_present_ack_port = MACH_PORT_NULL;
 static pthread_once_t g_present_ack_once = PTHREAD_ONCE_INIT;
 
+/*
+ * After Classic unloads WindowServer, the compositor inherits a session
+ * bootstrap subset. look_up of system MachServices then returns
+ * KERN_EXCEPTION_PROTECTED (32). Walk bootstrap_parent to the root and
+ * retry (2026-08-21 blank: MachServices check_in ok, present=0).
+ */
+static kern_return_t drm_bootstrap_look_up(const char *name, mach_port_t *out)
+{
+    mach_port_t bp = bootstrap_port;
+    kern_return_t kr = bootstrap_look_up(bp, (char *)name, out);
+    if (kr == KERN_SUCCESS)
+        return kr;
+
+    fprintf(stderr, "[drm] bootstrap_look_up %s: kr=%d %s (trying parents)\n",
+            name, (int)kr, mach_error_string(kr));
+
+    for (int depth = 1; depth <= 8; depth++) {
+        mach_port_t parent = MACH_PORT_NULL;
+        kern_return_t pkr = bootstrap_parent(bp, &parent);
+        if (pkr != KERN_SUCCESS || parent == MACH_PORT_NULL ||
+            parent == bp) {
+            break;
+        }
+        if (bp != bootstrap_port)
+            mach_port_deallocate(mach_task_self(), bp);
+        bp = parent;
+        kr = bootstrap_look_up(bp, (char *)name, out);
+        if (kr == KERN_SUCCESS) {
+            fprintf(stderr, "[drm] bootstrap_look_up %s ok via parent depth=%d\n",
+                    name, depth);
+            if (bp != bootstrap_port)
+                mach_port_deallocate(mach_task_self(), bp);
+            return KERN_SUCCESS;
+        }
+    }
+    if (bp != bootstrap_port)
+        mach_port_deallocate(mach_task_self(), bp);
+    return kr;
+}
+
 static void create_present_ack_port(void)
 {
     if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
@@ -22,9 +62,8 @@ static void create_present_ack_port(void)
 static int send_msg(drm_ipc_msg_t *msg, size_t msg_size)
 {
     if (g_cached_port == MACH_PORT_NULL) {
-        kern_return_t kr = bootstrap_look_up(bootstrap_port,
-                                             DRM_IPC_SERVICE_NAME,
-                                             &g_cached_port);
+        kern_return_t kr = drm_bootstrap_look_up(DRM_IPC_SERVICE_NAME,
+                                                  &g_cached_port);
         if (kr != KERN_SUCCESS) {
             fprintf(stderr, "[drm] bootstrap_look_up %s: %s\n",
                     DRM_IPC_SERVICE_NAME, mach_error_string(kr));
@@ -48,9 +87,8 @@ static int send_msg(drm_ipc_msg_t *msg, size_t msg_size)
         mach_port_deallocate(mach_task_self(), g_cached_port);
         g_cached_port = MACH_PORT_NULL;
 
-        kern_return_t kr2 = bootstrap_look_up(bootstrap_port,
-                                              DRM_IPC_SERVICE_NAME,
-                                              &g_cached_port);
+        kern_return_t kr2 = drm_bootstrap_look_up(DRM_IPC_SERVICE_NAME,
+                                                   &g_cached_port);
         if (kr2 != KERN_SUCCESS) return -1;
 
         msg->header.msgh_remote_port = g_cached_port;
