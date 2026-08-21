@@ -546,6 +546,10 @@ int main(void)
         }
         printf("[framebufferd] CAWindowServer ready, display=%s\n",
                g_display ? "yes" : "no");
+        fflush(stdout);
+        fprintf(stderr, "[framebufferd] CAWindowServer ready, display=%s\n",
+                g_display ? "yes" : "no");
+        fflush(stderr);
         if (!g_display) {
             fprintf(stderr,
                     "[framebufferd] FAIL: no CAWindowServerDisplay after "

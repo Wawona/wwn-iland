@@ -459,6 +459,8 @@ static int modeb_chord_filter(int evdev_key, int pressed)
         g_mod_alt = pressed ? 1 : 0;
         return 0;
     }
+    /* Mac Option is HID Left/Right Alt (0xE2/0xE6). Do not treat Command
+     * (Meta) as Alt: Linux Ctrl+Alt chords are Option on Apple keyboards. */
     if (!pressed || !g_mod_ctrl || !g_mod_alt)
         return 0;
 
