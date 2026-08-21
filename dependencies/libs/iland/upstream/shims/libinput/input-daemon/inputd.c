@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <mach/mach.h>
 #include <bootstrap.h>
@@ -402,8 +403,81 @@ static void send_device_removed(int id)
     send_event(&msg);
 }
 
+/*
+ * Mode B Linux-like chords (userspace VTs; no kernel tty):
+ *   Ctrl+Alt+F1..F6  -> /tmp/libwayland-support/modeb-vt  (1..6)
+ *   Ctrl+Alt+F7      -> modeb-vt = 7 (graphics)
+ *   Ctrl+Alt+Backspace -> modeb-restore-aqua + SIGTERM Mode B client
+ */
+static int g_mod_ctrl;
+static int g_mod_alt;
+
+static void modeb_write_vt(int vt)
+{
+    const char *path = "/tmp/libwayland-support/modeb-vt";
+    char buf[8];
+    int n = snprintf(buf, sizeof(buf), "%d\n", vt);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return;
+    if (n > 0)
+        (void)write(fd, buf, (size_t)n);
+    close(fd);
+    fprintf(stderr, "[inputd] Mode B VT switch -> %d\n", vt);
+}
+
+static void modeb_request_restore_aqua(void)
+{
+    const char *stamp = "/tmp/libwayland-support/modeb-restore-aqua";
+    const char *pidfile = "/tmp/libwayland-support/modeb-compositor.pid";
+    int fd = open(stamp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        const char *msg = "ctrl-alt-backspace\n";
+        (void)write(fd, msg, strlen(msg));
+        close(fd);
+    }
+    fprintf(stderr, "[inputd] Mode B restore Aqua requested\n");
+    FILE *pf = fopen(pidfile, "r");
+    if (pf) {
+        int pid = 0;
+        if (fscanf(pf, "%d", &pid) == 1 && pid > 1) {
+            kill(pid, SIGTERM);
+            fprintf(stderr, "[inputd] SIGTERM Mode B client pid=%d\n", pid);
+        }
+        fclose(pf);
+    }
+}
+
+/* Returns 1 if the key was consumed as a Mode B chord (do not fan out). */
+static int modeb_chord_filter(int evdev_key, int pressed)
+{
+    if (evdev_key == KEY_LEFTCTRL || evdev_key == KEY_RIGHTCTRL) {
+        g_mod_ctrl = pressed ? 1 : 0;
+        return 0;
+    }
+    if (evdev_key == KEY_LEFTALT || evdev_key == KEY_RIGHTALT) {
+        g_mod_alt = pressed ? 1 : 0;
+        return 0;
+    }
+    if (!pressed || !g_mod_ctrl || !g_mod_alt)
+        return 0;
+
+    if (evdev_key == KEY_BACKSPACE) {
+        modeb_request_restore_aqua();
+        return 1;
+    }
+    if (evdev_key >= KEY_F1 && evdev_key <= KEY_F7) {
+        modeb_write_vt(evdev_key - KEY_F1 + 1);
+        return 1;
+    }
+    return 0;
+}
+
 static void send_key_event(uint64_t time, int key, int pressed)
 {
+    if (modeb_chord_filter(key, pressed))
+        return;
+
     input_ipc_event_t msg = {0};
     msg.header.msgh_bits      = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
     msg.header.msgh_local_port = MACH_PORT_NULL;
