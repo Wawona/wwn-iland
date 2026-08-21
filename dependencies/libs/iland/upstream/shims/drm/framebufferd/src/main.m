@@ -93,9 +93,7 @@ static void TimerCallback(CFRunLoopTimerRef timer, void *info)
         uint64_t n = ++g_present_count;
         if (n == 1 || (n % 60) == 0) {
             fprintf(stderr,
-                    "[framebufferd] presentSurface n=%llu w=%zu h=%zu "
-                    "(WS still up ⇒ panel may not change; Classic needs "
-                    "WindowServer unloaded)\n",
+                    "[framebufferd] presentSurface n=%llu w=%zu h=%zu\n",
                     (unsigned long long)n,
                     (size_t)IOSurfaceGetWidth(client),
                     (size_t)IOSurfaceGetHeight(client));
@@ -349,6 +347,16 @@ int main(void)
         *(void **)(fake_sub_object + 0xD0) = fake_event_data;
         *(void **)(fake_event_data + 0xA0) = fake_event_caps;
 
+        /*
+         * CoreBedtime order (install-weston.sh unloads WindowServer first,
+         * then framebufferd): DispDrvInit *before* CAWindowServer. We had
+         * inverted that and also inited while Apple WS was still up
+         * (prove-before-unload). presentSurface then never owned the panel.
+         */
+        fn_DispDrvInit();
+        fprintf(stderr, "[framebufferd] CoreDisplay initialised "
+                        "(DispDrvInit before CAWindowServer; CoreBedtime)\n");
+
         /* ── Create CAWindowServer instance ─────────────────────────── */
         Class caWS = NSClassFromString(@"CAWindowServer");
         if (p_shared_server) *p_shared_server = NULL;
@@ -360,11 +368,23 @@ int main(void)
 
         if (p_g_server) *p_g_server = (__bridge void *)server;
 
-        void *impl = NULL;
-        object_getInstanceVariable(server, "_impl", &impl);
-        if (impl) {
-            NSArray *displays = (__bridge NSArray *)(*(void **)impl);
-            g_display = [displays firstObject];
+        /* Prefer public-ish -displays (CoreBedtime); fall back to _impl. */
+        g_display = nil;
+        if ([server respondsToSelector:NSSelectorFromString(@"displays")]) {
+            NSArray *displays =
+                ((id(*)(id, SEL))objc_msgSend)(
+                    server, NSSelectorFromString(@"displays"));
+            if ([displays isKindOfClass:[NSArray class]]) {
+                g_display = [displays firstObject];
+            }
+        }
+        if (!g_display) {
+            void *impl = NULL;
+            object_getInstanceVariable(server, "_impl", &impl);
+            if (impl) {
+                NSArray *displays = (__bridge NSArray *)(*(void **)impl);
+                g_display = [displays firstObject];
+            }
         }
         printf("[framebufferd] CAWindowServer ready, display=%s\n",
                g_display ? "yes" : "no");
@@ -375,13 +395,7 @@ int main(void)
             return 1;
         }
 
-        fn_DispDrvInit();
-        fprintf(stderr, "[framebufferd] CoreDisplay initialised\n");
-
-        /* Present source + 60Hz fallback *before* the Mach thread, so a flip
-         * that arrives during init can wake the run loop instead of waiting
-         * for the first timer fire.  Do not use CVDisplayLink here: that is
-         * a WindowServer client API and asserts once we are the server. */
+        /* Present source + 120Hz poll (CoreBedtime cadence) + Mach kick. */
         g_main_run_loop = CFRunLoopGetCurrent();
         CFRetain(g_main_run_loop);
         CFRunLoopSourceContext source_context = {0};
@@ -392,13 +406,13 @@ int main(void)
                            kCFRunLoopCommonModes);
 
         CFRunLoopTimerRef fallback_timer = CFRunLoopTimerCreate(
-            kCFAllocatorDefault, CFAbsoluteTimeGetCurrent(), 1.0 / 60,
+            kCFAllocatorDefault, CFAbsoluteTimeGetCurrent(), 1.0 / 120,
             0, 0, TimerCallback, NULL);
         CFRunLoopAddTimer(g_main_run_loop, fallback_timer,
                           kCFRunLoopCommonModes);
         fprintf(stderr,
-                "[framebufferd] in-server present: Mach kick + 60Hz timer "
-                "(CVDisplayLink is a client API; not used)\n");
+                "[framebufferd] in-server present: Mach kick + 120Hz timer "
+                "(CoreBedtime cadence; no CVDisplayLink)\n");
 
         /* ── Start Mach server thread ───────────────────────────────── */
         pthread_t thread;
