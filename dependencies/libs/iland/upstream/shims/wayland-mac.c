@@ -446,8 +446,10 @@ static void wayland_mac_load(void) {
     install_epoll_hooks();
     install_drm_hooks();
 
-    /* If framebufferd's Mach service is already registered, everything is
-     * already set up — skip support dir, amfi, and framebufferd spawn. */
+    /* If Classic helper already registered framebufferd (Mach-before-WS-
+     * unload), skip extract/spawn for it but still bring up inputd /
+     * caffeinate. A full early return left Classic without inputd. */
+    int framebufferd_already = 0;
     {
         mach_port_t port = MACH_PORT_NULL;
         kern_return_t kr = bootstrap_look_up(bootstrap_port,
@@ -455,7 +457,9 @@ static void wayland_mac_load(void) {
                                             &port);
         if (kr == KERN_SUCCESS) {
             mach_port_deallocate(mach_task_self(), port);
-            return;  /* already running, nothing to do */
+            framebufferd_already = 1;
+            wmac_log("[wayland-mac] com.wayland-mac.framebufferd already "
+                     "registered (helper-owned); skipping framebufferd spawn");
         }
     }
 
@@ -469,46 +473,60 @@ static void wayland_mac_load(void) {
     const char *amfiexceptiond_path = SUPPORT_DIR "/amfiexceptiond";
     const char *framebufferd_path    = SUPPORT_DIR "/framebufferd";
 
-    /* Extract and launch amfiexceptiond — wait for it to finish patching AMFI */
-    if (extract_section("__DATA_OBJ", "amfiexceptiond", amfiexceptiond_path) == 0) {
-        char *const argv[] = {
-            (char *)amfiexceptiond_path,
-            NULL
-        };
-        spawn_and_wait(amfiexceptiond_path, argv);
+    if (!framebufferd_already) {
+        /* Extract and launch amfiexceptiond — wait for it to finish patching AMFI */
+        if (extract_section("__DATA_OBJ", "amfiexceptiond", amfiexceptiond_path) == 0) {
+            char *const argv[] = {
+                (char *)amfiexceptiond_path,
+                NULL
+            };
+            spawn_and_wait(amfiexceptiond_path, argv);
+        }
+
+        /* Extract and launch framebufferd, then wait for its Mach service */
+        if (extract_section("__DATA_OBJ", "framebufferd", framebufferd_path) == 0) {
+            char *const argv[] = {
+                (char *)framebufferd_path,
+                NULL
+            };
+            if (spawn_background(framebufferd_path, argv, &g_framebufferd_pid,
+                                 "com.wayland-mac.framebufferd") != 0)
+                return;
+            write_helper_pid("framebufferd", g_framebufferd_pid);
+            g_owns_helpers = true;
+        } else {
+            wmac_log("[wayland-mac] could not extract framebufferd");
+            return;
+        }
     }
 
-    /* Extract and launch framebufferd, then wait for its Mach service */
-    if (extract_section("__DATA_OBJ", "framebufferd", framebufferd_path) == 0) {
-        char *const argv[] = {
-            (char *)framebufferd_path,
-            NULL
-        };
-        if (spawn_background(framebufferd_path, argv, &g_framebufferd_pid,
-                             "com.wayland-mac.framebufferd") != 0)
-            return;
-        write_helper_pid("framebufferd", g_framebufferd_pid);
-        g_owns_helpers = true;
-    } else {
-        wmac_log("[wayland-mac] could not extract framebufferd");
-        return;
-    }
 
-
-    /* Extract and launch inputd (input event daemon) */
-    const char *inputd_path = SUPPORT_DIR "/inputd";
-    if (extract_section("__DATA_OBJ", "inputd", inputd_path) == 0) {
-        char *const argv[] = {
-            (char *)inputd_path,
-            NULL
-        };
-        if (spawn_background(inputd_path, argv, &g_inputd_pid,
-                             "com.wayland-mac.inputd") != 0)
-            return;
-        write_helper_pid("inputd", g_inputd_pid);
-    } else {
-        wmac_log("[wayland-mac] could not extract inputd");
-        return;
+    /* Extract and launch inputd (input event daemon) unless already up. */
+    {
+        mach_port_t iport = MACH_PORT_NULL;
+        kern_return_t ikr = bootstrap_look_up(bootstrap_port,
+                                              "com.wayland-mac.inputd",
+                                              &iport);
+        if (ikr == KERN_SUCCESS) {
+            mach_port_deallocate(mach_task_self(), iport);
+            wmac_log("[wayland-mac] com.wayland-mac.inputd already registered");
+        } else {
+            const char *inputd_path = SUPPORT_DIR "/inputd";
+            if (extract_section("__DATA_OBJ", "inputd", inputd_path) == 0) {
+                char *const argv[] = {
+                    (char *)inputd_path,
+                    NULL
+                };
+                if (spawn_background(inputd_path, argv, &g_inputd_pid,
+                                     "com.wayland-mac.inputd") != 0)
+                    return;
+                write_helper_pid("inputd", g_inputd_pid);
+                g_owns_helpers = true;
+            } else {
+                wmac_log("[wayland-mac] could not extract inputd");
+                return;
+            }
+        }
     }
 
     /* Prevent display sleep while weston is running */
@@ -522,6 +540,7 @@ static void wayland_mac_load(void) {
                              NULL) != 0)
             return;
         write_helper_pid("caffeinate", g_caffeinate_pid);
+        g_owns_helpers = true;
     }
 }
 

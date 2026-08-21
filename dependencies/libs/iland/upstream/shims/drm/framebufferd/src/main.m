@@ -9,6 +9,9 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <signal.h>
+#include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
 
 #import <Foundation/Foundation.h>
 #import <QuartzCore/QuartzCore.h>
@@ -233,6 +236,56 @@ bool get_display_resolution(uint32_t *w, uint32_t *h) {
     return false;
 }
 
+/*
+ * Env gates (Classic Take Over helper):
+ *   WWN_MODEB_KEEP_WS=1     Mach IPC only; never claim the panel (probe).
+ *   WWN_MODEB_DEFER_DISPLAY=1
+ *     Register Mach while Apple WindowServer is still up (bootstrap_register
+ *     fails on 25F80 after WS bootout: kr=124/141). Then wait for
+ *     modeb-display-go before DispDrvInit / CAWindowServer. DispDrvInit must
+ *     still run with Apple WS already gone or presentSurface never owns the
+ *     panel (SPI doc + 2026-08-21 WS-up hold).
+ */
+static int env_truthy(const char *name)
+{
+    const char *v = getenv(name);
+    return v && v[0] != '\0' && strcmp(v, "0") != 0;
+}
+
+static void touch_stamp(const char *path)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0)
+        close(fd);
+}
+
+static int wait_for_path(const char *path, int tries, useconds_t us)
+{
+    int i;
+    for (i = 0; i < tries; i++) {
+        if (access(path, F_OK) == 0)
+            return 0;
+        usleep(us);
+    }
+    return -1;
+}
+
+static int g_mach_server_started = 0;
+
+static void ensure_mach_server_thread(void)
+{
+    if (g_mach_server_started)
+        return;
+    if (!g_main_run_loop) {
+        g_main_run_loop = CFRunLoopGetCurrent();
+        CFRetain(g_main_run_loop);
+    }
+    pthread_t thread;
+    pthread_create(&thread, NULL, mach_server_thread, NULL);
+    pthread_detach(thread);
+    g_mach_server_started = 1;
+}
+
 /* ── main ─────────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -271,28 +324,56 @@ int main(void)
         }
 
         printf("[framebufferd] listening on %s\n", DRM_IPC_SERVICE_NAME);
+        fflush(stdout);
 
         /*
          * KEEP_WS probe: Aqua stays up. Claiming the panel via CoreDisplay /
          * CAWindowServer blanks the only interactive display (2026-08-20).
          * Register Mach for weston DRM IPC, but skip panel present.
          */
-        if (getenv("WWN_MODEB_KEEP_WS") &&
-            getenv("WWN_MODEB_KEEP_WS")[0] != '\0' &&
-            strcmp(getenv("WWN_MODEB_KEEP_WS"), "0") != 0) {
+        if (env_truthy("WWN_MODEB_KEEP_WS")) {
             fprintf(stderr,
                     "[framebufferd] WWN_MODEB_KEEP_WS=1: Mach IPC only, "
                     "no CoreDisplay panel claim\n");
-            g_main_run_loop = CFRunLoopGetCurrent();
-            CFRetain(g_main_run_loop);
-            pthread_t thread;
-            pthread_create(&thread, NULL, mach_server_thread, NULL);
-            pthread_detach(thread);
+            ensure_mach_server_thread();
             CFRunLoopRun();
             CFRelease(g_main_run_loop);
             g_main_run_loop = NULL;
             g_running = false;
             return 0;
+        }
+
+        /*
+         * Classic: Mach first (Aqua still up), then helper unloads WS and
+         * touches modeb-display-go so DispDrvInit runs with WS already gone.
+         */
+        if (env_truthy("WWN_MODEB_DEFER_DISPLAY")) {
+            const char *mach_ready =
+                "/tmp/libwayland-support/modeb-mach.ready";
+            const char *display_go =
+                "/tmp/libwayland-support/modeb-display-go";
+
+            ensure_mach_server_thread();
+            touch_stamp(mach_ready);
+            fprintf(stderr,
+                    "[framebufferd] WWN_MODEB_DEFER_DISPLAY=1: Mach registered; "
+                    "waiting for %s (WS must be down before DispDrvInit)\n",
+                    display_go);
+            fflush(stderr);
+
+            if (wait_for_path(display_go, 240, 250000) != 0) {
+                fprintf(stderr,
+                        "[framebufferd] FAIL: timed out waiting for %s\n",
+                        display_go);
+                g_running = false;
+                return 1;
+            }
+            fprintf(stderr,
+                    "[framebufferd] modeb-display-go seen; starting CoreDisplay "
+                    "pipeline\n");
+            fflush(stderr);
+            /* Fall through: DispDrvInit / CAWindowServer / present. Mach
+             * thread already running. */
         }
 
         /* ── Set up CAWindowServer display pipeline ────────────────────
@@ -436,8 +517,10 @@ int main(void)
         }
 
         /* Present source + 120Hz poll (CoreBedtime cadence) + Mach kick. */
-        g_main_run_loop = CFRunLoopGetCurrent();
-        CFRetain(g_main_run_loop);
+        if (!g_main_run_loop) {
+            g_main_run_loop = CFRunLoopGetCurrent();
+            CFRetain(g_main_run_loop);
+        }
         CFRunLoopSourceContext source_context = {0};
         source_context.perform = PresentSourcePerform;
         g_present_source = CFRunLoopSourceCreate(kCFAllocatorDefault, 0,
@@ -454,10 +537,7 @@ int main(void)
                 "[framebufferd] in-server present: Mach kick + 120Hz timer "
                 "(CoreBedtime cadence; no CVDisplayLink)\n");
 
-        /* ── Start Mach server thread ───────────────────────────────── */
-        pthread_t thread;
-        pthread_create(&thread, NULL, mach_server_thread, NULL);
-        pthread_detach(thread);
+        ensure_mach_server_thread();
 
         printf("[framebufferd] direct-present mode (zero-copy, host vsync)\n");
         CFRunLoopRun();
