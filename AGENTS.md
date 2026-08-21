@@ -21,7 +21,8 @@ vanilla CoreBedtime behavior.
 | **B** | `registryFragment.iland-baremetal` → `macos-baremetal.nix` only | `libwayland-mac.dylib` | **Only** Wawona `wawona-macos-desktop-host` |
 
 - Mode B = Dobby + `DYLD_INSERT_LIBRARIES` + embedded `framebufferd` /
-  `inputd` / `amfiexceptiond`. Needs SIP debugging off + root. **Not** App Store.
+  `inputd` / `amfiexceptiond`. Needs SIP fully disabled (`csrutil disable`) +
+  root. **Not** App Store.
 - Never add `iland-baremetal` variants for iOS/iPadOS/tvOS/watchOS/visionOS/Android.
 - tvOS/watchOS Mode A builds are empty stubs (no ANGLE/IOKit). See workspace
   rule `wwn-iland-apple-fallback`.

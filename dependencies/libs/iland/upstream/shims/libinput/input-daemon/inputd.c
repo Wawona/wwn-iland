@@ -799,8 +799,9 @@ int main(void)
     kr = bootstrap_register(bootstrap_port, INPUT_IPC_SERVICE_NAME,
                              g_server_port);
     if (kr != KERN_SUCCESS) {
-        fprintf(stderr, "[inputd] bootstrap_register %s: %s\n",
-                INPUT_IPC_SERVICE_NAME, mach_error_string(kr));
+        fprintf(stderr, "[inputd] bootstrap_register %s: kr=%d (0x%x) %s\n",
+                INPUT_IPC_SERVICE_NAME, (int)kr, (unsigned)kr,
+                mach_error_string(kr));
         return 1;
     }
 

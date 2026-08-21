@@ -80,7 +80,7 @@ extraArgs = { ilandSrc = wwn-iland; };  # weston copies upstream/shims/* from he
 | Artifact | `libiland_userland.a` | `libwayland-mac.dylib` |
 | Platforms | macOS, iOS/iPadOS/visionOS, Android; tvOS/watchOS stubs | **macOS only** |
 | Present | In-process `iland_drm_set_present_callback` | Mach IPC → `framebufferd` (SkyLight) |
-| SIP / root | Not required | SIP debugging off (or SIP disabled) + root |
+| SIP / root | Not required | SIP fully disabled (`csrutil disable`) + root |
 | App Store | Yes | No — Developer ID / desktop-host only |
 
 Wawona wires Mode B only when SIP allows (`WWNSipStatus`) **and** Settings →

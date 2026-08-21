@@ -1,8 +1,8 @@
-# iland Mode B — macOS-only WindowServer/SkyLight replacement dylib.
+# iland Mode B: macOS-only WindowServer/SkyLight replacement dylib.
 #
 # Builds upstream libwayland-mac.dylib (Dobby hooks + embedded amfiexceptiond /
-# framebufferd / inputd). NOT App-Store-safe: requires SIP debugging
-# restrictions off (or SIP fully disabled), root for the constructor, and
+# framebufferd / inputd). NOT App-Store-safe: requires SIP fully disabled
+# (`csrutil disable` in Recovery), root for the constructor, and
 # private entitlements on the helper daemons.
 #
 # Consumed only by Wawona desktop-host / full-dev macOS packaging. Never built
@@ -130,7 +130,7 @@ target_compile_definitions(egl-shim PRIVATE ILAND_NO_WL_WINSYS=1)'
     cat > $out/nix-support/README.txt <<'EOF'
     iland Mode B dylib (libwayland-mac.dylib).
     Load via DYLD_INSERT_LIBRARIES into a root-launched weston --backend=drm
-    process when SIP allows debugging restrictions off and Desktop Replacement
+    process when SIP is fully disabled (csrutil disable) and Desktop Replacement
     is enabled. Never ship in App Store / store-safe builds.
     EOF
   '';

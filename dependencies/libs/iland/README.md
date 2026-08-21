@@ -22,7 +22,7 @@ Wayland clients and Weston tools (e.g. `weston-simple-egl`, `kmscube`,
   IOSurfaces composited by Wawona's in-window CAMetalLayer renderer; GL is ANGLE.
 - **Mode B — bare-metal WindowServer replacement (macOS ONLY; opt-in; NOT
   App-Store-safe).** Re-enables upstream's Dobby code injection, AMFI bypass,
-  `framebufferd`/SkyLight, and `inputd` (requires SIP disabled + root). Gated
+  `framebufferd`/SkyLight, and `inputd` (requires SIP fully disabled + root). Gated
   behind `iland-baremetal` (default off) and Wawona's `profile-desktop-host` /
   `profile-full-dev`. Never compiled for iOS/iPadOS/tvOS/visionOS/watchOS or
   App Store / `store-safe` builds.

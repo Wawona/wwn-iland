@@ -235,6 +235,61 @@ int posix_spawnattr_setprocesstype_np(posix_spawnattr_t *, const int);
 int posix_spawnattr_set_launch_type_np(posix_spawnattr_t *attr, int launch_type);
 int posix_spawnattr_set_darwin_role_np(const posix_spawnattr_t * __restrict, uint64_t);
 
+static void wmac_log(const char *fmt, ...) {
+    char buf[768];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        return;
+    }
+    if (n > (int)sizeof(buf) - 2) {
+        n = (int)sizeof(buf) - 2;
+    }
+    buf[n++] = '\n';
+    (void)write(STDERR_FILENO, buf, (size_t)n);
+    int fd = open("/tmp/wawona-modeb.log", O_WRONLY | O_APPEND | O_CREAT, 0666);
+    if (fd >= 0) {
+        (void)write(fd, buf, (size_t)n);
+        close(fd);
+    }
+}
+
+static int spawn_one(const char *path, char *const argv[], pid_t *pid_out,
+                     int as_system_service) {
+    pid_t pid;
+    posix_spawnattr_t spattr;
+    posix_spawnattr_init(&spattr);
+    posix_spawnattr_setprocesstype_np(&spattr,
+                                      POSIX_SPAWN_PROC_TYPE_DAEMON_INTERACTIVE);
+    if (as_system_service) {
+        posix_spawnattr_set_launch_type_np(&spattr, CS_LAUNCH_TYPE_SYSTEM_SERVICE);
+        if (strstr(path, "framebufferd") != NULL) {
+            posix_spawnattr_set_darwin_role_np(&spattr, 0x4);
+        }
+    }
+
+    int ret = posix_spawn(&pid, path, NULL, &spattr, argv, clean_environ());
+    posix_spawnattr_destroy(&spattr);
+    if (ret != 0) {
+        wmac_log("[wayland-mac] posix_spawn %s (system=%d): %s", path,
+                 as_system_service, strerror(ret));
+        return -1;
+    }
+    usleep(80000);
+    if (kill(pid, 0) != 0 && errno == ESRCH) {
+        wmac_log("[wayland-mac] %s pid %d died immediately (system=%d)", path,
+                 (int)pid, as_system_service);
+        return -1;
+    }
+    if (pid_out)
+        *pid_out = pid;
+    wmac_log("[wayland-mac] spawned %s pid=%d system=%d", path, (int)pid,
+             as_system_service);
+    return 0;
+}
+
 static int spawn_and_wait(const char *path, char *const argv[]) {
     pid_t pid;
     posix_spawnattr_t spattr;
@@ -243,42 +298,75 @@ static int spawn_and_wait(const char *path, char *const argv[]) {
     posix_spawnattr_set_launch_type_np(&spattr, CS_LAUNCH_TYPE_SYSTEM_SERVICE);
 
     int ret = posix_spawn(&pid, path, NULL, &spattr, argv, clean_environ());
+    posix_spawnattr_destroy(&spattr);
     if (ret != 0) {
-        fprintf(stderr, "[wayland-mac] posix_spawn %s: %s\n", path,
-                strerror(ret));
+        wmac_log("[wayland-mac] posix_spawn %s: %s", path, strerror(ret));
         return -1;
     }
     int status;
     if (waitpid(pid, &status, 0) < 0) {
-        fprintf(stderr, "[wayland-mac] waitpid %s: %s\n", path,
-                strerror(errno));
+        wmac_log("[wayland-mac] waitpid %s: %s", path, strerror(errno));
         return -1;
     }
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-static int spawn_background(const char *path, char *const argv[], pid_t *pid_out) {
-    pid_t pid;
-    posix_spawnattr_t spattr;
-    posix_spawnattr_init(&spattr);
-    posix_spawnattr_setprocesstype_np(&spattr, POSIX_SPAWN_PROC_TYPE_DAEMON_INTERACTIVE);
-    posix_spawnattr_set_launch_type_np(&spattr, CS_LAUNCH_TYPE_SYSTEM_SERVICE);
-
-    if (strstr(path, "framebufferd") != NULL) {
-        posix_spawnattr_set_darwin_role_np(
-            &spattr,
-            0x4); // PRIO_DARWIN_ROLE_UI_FOCAL
+static int wait_mach_service(const char *name, int tries) {
+    mach_port_t port = MACH_PORT_NULL;
+    int i;
+    for (i = 0; i < tries; i++) {
+        kern_return_t kr = bootstrap_look_up(bootstrap_port, (char *)name, &port);
+        if (kr == KERN_SUCCESS) {
+            mach_port_deallocate(mach_task_self(), port);
+            wmac_log("[wayland-mac] %s registered", name);
+            return 0;
+        }
+        usleep(50000);
     }
+    wmac_log("[wayland-mac] timeout waiting for %s", name);
+    return -1;
+}
 
-    int ret = posix_spawn(&pid, path, NULL, &spattr, argv, clean_environ());
-    if (ret != 0) {
-        fprintf(stderr, "[wayland-mac] posix_spawn %s: %s\n", path,
-                strerror(ret));
-        return -1;
+/*
+ * Spawn background helpers. Prefer CS_LAUNCH_TYPE_SYSTEM_SERVICE (CoreBedtime),
+ * but on 25F80 that domain can accept the process while bootstrap_register
+ * fails ("unknown error code"). Verify the Mach name when required; on miss,
+ * kill and retry without SYSTEM_SERVICE.
+ */
+static int spawn_background(const char *path, char *const argv[], pid_t *pid_out,
+                            const char *mach_name) {
+    int attempt;
+    for (attempt = 0; attempt < 2; attempt++) {
+        int as_sys = (attempt == 0) ? 1 : 0;
+        pid_t pid = -1;
+        if (spawn_one(path, argv, &pid, as_sys) != 0) {
+            if (as_sys) {
+                wmac_log("[wayland-mac] retry %s without CS_LAUNCH_TYPE_SYSTEM_SERVICE",
+                         path);
+                continue;
+            }
+            return -1;
+        }
+        if (mach_name != NULL) {
+            if (wait_mach_service(mach_name, 40) != 0) {
+                wmac_log("[wayland-mac] %s pid %d up but %s not registered "
+                         "(system=%d); killing and retrying",
+                         path, (int)pid, mach_name, as_sys);
+                (void)kill(pid, SIGTERM);
+                usleep(100000);
+                (void)kill(pid, SIGKILL);
+                if (!as_sys)
+                    return -1;
+                wmac_log("[wayland-mac] retry %s without CS_LAUNCH_TYPE_SYSTEM_SERVICE",
+                         path);
+                continue;
+            }
+        }
+        if (pid_out)
+            *pid_out = pid;
+        return 0;
     }
-    if (pid_out)
-        *pid_out = pid;
-    return 0;
+    return -1;
 }
 
 static void stop_owned_helper(pid_t *pid, const char *name)
@@ -332,10 +420,11 @@ static void install_drm_hooks(void)
 __attribute__((constructor))
 static void wayland_mac_load(void) {
     if (geteuid() != 0) {
-        fprintf(stderr, "[wayland-mac] must run as root\n");
+        wmac_log("[wayland-mac] must run as root");
         abort();
         return;
     }
+    wmac_log("[wayland-mac] constructor begin uid=%d", (int)geteuid());
 
     /* Create a real pipe dup'd to DRM_VIRTUAL_FD so select/poll work on
      * our virtual DRM fd.  The read end becomes fd 42; the write end is
@@ -395,12 +484,13 @@ static void wayland_mac_load(void) {
             (char *)framebufferd_path,
             NULL
         };
-        if (spawn_background(framebufferd_path, argv, &g_framebufferd_pid) != 0)
+        if (spawn_background(framebufferd_path, argv, &g_framebufferd_pid,
+                             "com.wayland-mac.framebufferd") != 0)
             return;
         write_helper_pid("framebufferd", g_framebufferd_pid);
         g_owns_helpers = true;
     } else {
-        fprintf(stderr, "[wayland-mac] could not extract framebufferd\n");
+        wmac_log("[wayland-mac] could not extract framebufferd");
         return;
     }
 
@@ -412,11 +502,12 @@ static void wayland_mac_load(void) {
             (char *)inputd_path,
             NULL
         };
-        if (spawn_background(inputd_path, argv, &g_inputd_pid) != 0)
+        if (spawn_background(inputd_path, argv, &g_inputd_pid,
+                             "com.wayland-mac.inputd") != 0)
             return;
         write_helper_pid("inputd", g_inputd_pid);
     } else {
-        fprintf(stderr, "[wayland-mac] could not extract inputd\n");
+        wmac_log("[wayland-mac] could not extract inputd");
         return;
     }
 
@@ -427,33 +518,10 @@ static void wayland_mac_load(void) {
             (char *)"-d",
             NULL
         };
-        if (spawn_background("/usr/bin/caffeinate", argv, &g_caffeinate_pid) != 0)
+        if (spawn_background("/usr/bin/caffeinate", argv, &g_caffeinate_pid,
+                             NULL) != 0)
             return;
         write_helper_pid("caffeinate", g_caffeinate_pid);
-    }
-
-    {
-        mach_port_t port = MACH_PORT_NULL;
-        kern_return_t kr;
-        do {
-            kr = bootstrap_look_up(bootstrap_port,
-                                   "com.wayland-mac.inputd", &port);
-            if (kr != KERN_SUCCESS)
-                usleep(5000);
-        } while (kr != KERN_SUCCESS);
-        mach_port_deallocate(mach_task_self(), port);
-    }
-
-    {
-        mach_port_t port = MACH_PORT_NULL;
-        kern_return_t kr;
-        do {
-            kr = bootstrap_look_up(bootstrap_port,
-                                   "com.wayland-mac.framebufferd", &port);
-            if (kr != KERN_SUCCESS)
-                usleep(5000);
-        } while (kr != KERN_SUCCESS);
-        mach_port_deallocate(mach_task_self(), port);
     }
 }
 
