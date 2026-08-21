@@ -446,11 +446,16 @@ static void wayland_mac_load(void) {
     install_epoll_hooks();
     install_drm_hooks();
 
-    /* If Classic helper already registered framebufferd (Mach-before-WS-
-     * unload), skip extract/spawn for it but still bring up inputd /
-     * caffeinate. A full early return left Classic without inputd. */
+    /* Classic helper publishes Mach via launchd MachServices. After WS
+     * unload, bootstrap_look_up of a legacy register name fails
+     * ("exception protected"), so never spawn a second framebufferd when
+     * the helper already armed modeb-mach.ready / owns the pidfile. */
     int framebufferd_already = 0;
-    {
+    if (access("/tmp/libwayland-support/modeb-mach.ready", F_OK) == 0) {
+        framebufferd_already = 1;
+        wmac_log("[wayland-mac] modeb-mach.ready present (helper-owned); "
+                 "skipping framebufferd spawn");
+    } else {
         mach_port_t port = MACH_PORT_NULL;
         kern_return_t kr = bootstrap_look_up(bootstrap_port,
                                             "com.wayland-mac.framebufferd",
@@ -459,7 +464,7 @@ static void wayland_mac_load(void) {
             mach_port_deallocate(mach_task_self(), port);
             framebufferd_already = 1;
             wmac_log("[wayland-mac] com.wayland-mac.framebufferd already "
-                     "registered (helper-owned); skipping framebufferd spawn");
+                     "registered; skipping framebufferd spawn");
         }
     }
 

@@ -27,17 +27,26 @@ Apple `WindowServer` must already be down for **DispDrvInit /
 CAWindowServer / presentSurface** (session-only bootout; never sticky
 `unload -w` / `launchctl disable`).
 
-**Mach registration is separate.** On 25F80, `bootstrap_register` for
-`com.wayland-mac.framebufferd` fails after WS bootout (`kr=124` / `kr=141`).
-Classic therefore:
+**Mach registration is separate.** On 25F80:
+
+- Legacy `bootstrap_register` after WS bootout fails (`kr=124` / `kr=141`).
+- A name registered with `bootstrap_register` *before* WS unload becomes
+  `bootstrap_look_up` **"exception protected"** after WS is gone (2026-08-21
+  blank: Output+CoreDisplay ok, `presentSurface` never ran).
+
+Classic therefore publishes via **launchd MachServices** +
+`bootstrap_check_in` (system bootstrap survives WS), with
+`WWN_MODEB_DEFER_DISPLAY=1`:
 
 1. Extract helpers from `libwayland-mac.dylib` while Aqua is up
-2. Spawn `framebufferd` with `WWN_MODEB_DEFER_DISPLAY=1` (registers Mach,
-   touches `modeb-mach.ready`, waits)
+2. `launchctl bootstrap` `com.wayland-mac.framebufferd` /
+   `com.wayland-mac.inputd` (MachServices); framebufferd check_in, touches
+   `modeb-mach.ready`, waits
 3. Session-only unload Path B `watchdogd` + WindowServer
 4. Touch `modeb-display-go` so framebufferd continues
 5. DispDrvInit pipeline (below)
-6. Inject compositor (`DYLD_INSERT_LIBRARIES`); dylib reuses the live Mach name
+6. Inject compositor (`DYLD_INSERT_LIBRARIES`); dylib skips helper-owned
+   framebufferd when `modeb-mach.ready` is present
 
 DispDrvInit pipeline (WS already down):
 

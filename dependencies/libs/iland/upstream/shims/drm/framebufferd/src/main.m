@@ -294,33 +294,70 @@ int main(void)
     signal(SIGTERM, handle_signal);
 
     @autoreleasepool {
-        /* ── Register Mach service ───────────────────────────────────── */
-        kern_return_t kr = mach_port_allocate(mach_task_self(),
-                                               MACH_PORT_RIGHT_RECEIVE,
-                                               &g_server_port);
-        if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "[framebufferd] mach_port_allocate: %s\n",
-                    mach_error_string(kr));
-            return 1;
-        }
-
-        kr = mach_port_insert_right(mach_task_self(), g_server_port,
-                                     g_server_port,
-                                     MACH_MSG_TYPE_MAKE_SEND);
-        if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "[framebufferd] mach_port_insert_right: %s\n",
-                    mach_error_string(kr));
-            return 1;
-        }
-
-        kr = bootstrap_register(bootstrap_port, DRM_IPC_SERVICE_NAME,
-                                 g_server_port);
-        if (kr != KERN_SUCCESS) {
+        /* ── Publish Mach service ──────────────────────────────────────
+         *
+         * Classic Take Over unloads WindowServer. A legacy
+         * bootstrap_register name from the Aqua session becomes
+         * look_up-"exception protected" after that (2026-08-21 blank).
+         * When launched via launchd MachServices (WWN_MODEB_LAUNCHD=1),
+         * bootstrap_check_in publishes into the system bootstrap that
+         * survives WS bootout. KEEP_WS keeps bootstrap_register.
+         */
+        kern_return_t kr;
+        if (env_truthy("WWN_MODEB_LAUNCHD")) {
+            kr = bootstrap_check_in(bootstrap_port, DRM_IPC_SERVICE_NAME,
+                                    &g_server_port);
+            if (kr != KERN_SUCCESS) {
+                fprintf(stderr,
+                        "[framebufferd] bootstrap_check_in %s: kr=%d (0x%x) %s\n",
+                        DRM_IPC_SERVICE_NAME, (int)kr, (unsigned)kr,
+                        mach_error_string(kr));
+                return 1;
+            }
             fprintf(stderr,
-                    "[framebufferd] bootstrap_register %s: kr=%d (0x%x) %s\n",
-                    DRM_IPC_SERVICE_NAME, (int)kr, (unsigned)kr,
-                    mach_error_string(kr));
-            return 1;
+                    "[framebufferd] MachServices check_in %s ok\n",
+                    DRM_IPC_SERVICE_NAME);
+        } else {
+            kr = mach_port_allocate(mach_task_self(),
+                                    MACH_PORT_RIGHT_RECEIVE,
+                                    &g_server_port);
+            if (kr != KERN_SUCCESS) {
+                fprintf(stderr, "[framebufferd] mach_port_allocate: %s\n",
+                        mach_error_string(kr));
+                return 1;
+            }
+
+            kr = mach_port_insert_right(mach_task_self(), g_server_port,
+                                         g_server_port,
+                                         MACH_MSG_TYPE_MAKE_SEND);
+            if (kr != KERN_SUCCESS) {
+                fprintf(stderr, "[framebufferd] mach_port_insert_right: %s\n",
+                        mach_error_string(kr));
+                return 1;
+            }
+
+            kr = bootstrap_register(bootstrap_port, DRM_IPC_SERVICE_NAME,
+                                     g_server_port);
+            if (kr != KERN_SUCCESS) {
+                fprintf(stderr,
+                        "[framebufferd] bootstrap_register %s: kr=%d (0x%x) %s\n",
+                        DRM_IPC_SERVICE_NAME, (int)kr, (unsigned)kr,
+                        mach_error_string(kr));
+                return 1;
+            }
+        }
+
+        {
+            /* Helper + dylib pidfile checks (Classic fail-closed). */
+            char pidbuf[32];
+            int n = snprintf(pidbuf, sizeof(pidbuf), "%d\n", (int)getpid());
+            int pfd = open("/tmp/libwayland-support/framebufferd.pid",
+                           O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (pfd >= 0) {
+                if (n > 0)
+                    (void)write(pfd, pidbuf, (size_t)n);
+                close(pfd);
+            }
         }
 
         printf("[framebufferd] listening on %s\n", DRM_IPC_SERVICE_NAME);

@@ -779,30 +779,61 @@ int main(void)
     signal(SIGINT,  handle_signal);
     signal(SIGTERM, handle_signal);
 
-    kern_return_t kr = mach_port_allocate(mach_task_self(),
-                                           MACH_PORT_RIGHT_RECEIVE,
-                                           &g_server_port);
-    if (kr != KERN_SUCCESS) {
-        fprintf(stderr, "[inputd] mach_port_allocate: %s\n",
-                mach_error_string(kr));
-        return 1;
+    /*
+     * Classic: launchd MachServices + bootstrap_check_in so the name lives
+     * in the system bootstrap after WindowServer bootout. KEEP_WS / direct
+     * spawn keeps bootstrap_register.
+     */
+    kern_return_t kr;
+    const char *launchd = getenv("WWN_MODEB_LAUNCHD");
+    if (launchd && launchd[0] && strcmp(launchd, "0") != 0) {
+        kr = bootstrap_check_in(bootstrap_port, INPUT_IPC_SERVICE_NAME,
+                                &g_server_port);
+        if (kr != KERN_SUCCESS) {
+            fprintf(stderr, "[inputd] bootstrap_check_in %s: kr=%d (0x%x) %s\n",
+                    INPUT_IPC_SERVICE_NAME, (int)kr, (unsigned)kr,
+                    mach_error_string(kr));
+            return 1;
+        }
+        fprintf(stderr, "[inputd] MachServices check_in %s ok\n",
+                INPUT_IPC_SERVICE_NAME);
+    } else {
+        kr = mach_port_allocate(mach_task_self(),
+                                MACH_PORT_RIGHT_RECEIVE,
+                                &g_server_port);
+        if (kr != KERN_SUCCESS) {
+            fprintf(stderr, "[inputd] mach_port_allocate: %s\n",
+                    mach_error_string(kr));
+            return 1;
+        }
+
+        kr = mach_port_insert_right(mach_task_self(), g_server_port,
+                                     g_server_port, MACH_MSG_TYPE_MAKE_SEND);
+        if (kr != KERN_SUCCESS) {
+            fprintf(stderr, "[inputd] mach_port_insert_right: %s\n",
+                    mach_error_string(kr));
+            return 1;
+        }
+
+        kr = bootstrap_register(bootstrap_port, INPUT_IPC_SERVICE_NAME,
+                                 g_server_port);
+        if (kr != KERN_SUCCESS) {
+            fprintf(stderr, "[inputd] bootstrap_register %s: kr=%d (0x%x) %s\n",
+                    INPUT_IPC_SERVICE_NAME, (int)kr, (unsigned)kr,
+                    mach_error_string(kr));
+            return 1;
+        }
     }
 
-    kr = mach_port_insert_right(mach_task_self(), g_server_port,
-                                 g_server_port, MACH_MSG_TYPE_MAKE_SEND);
-    if (kr != KERN_SUCCESS) {
-        fprintf(stderr, "[inputd] mach_port_insert_right: %s\n",
-                mach_error_string(kr));
-        return 1;
-    }
-
-    kr = bootstrap_register(bootstrap_port, INPUT_IPC_SERVICE_NAME,
-                             g_server_port);
-    if (kr != KERN_SUCCESS) {
-        fprintf(stderr, "[inputd] bootstrap_register %s: kr=%d (0x%x) %s\n",
-                INPUT_IPC_SERVICE_NAME, (int)kr, (unsigned)kr,
-                mach_error_string(kr));
-        return 1;
+    {
+        char pidbuf[32];
+        int n = snprintf(pidbuf, sizeof(pidbuf), "%d\n", (int)getpid());
+        FILE *pf = fopen("/tmp/libwayland-support/inputd.pid", "w");
+        if (pf) {
+            if (n > 0)
+                fwrite(pidbuf, 1, (size_t)n, pf);
+            fclose(pf);
+        }
     }
 
     fprintf(stderr, "[inputd] listening on %s\n", INPUT_IPC_SERVICE_NAME);
