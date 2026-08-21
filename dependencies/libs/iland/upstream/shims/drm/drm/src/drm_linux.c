@@ -1619,7 +1619,6 @@ drmModePlanePtr drmModeGetPlane(int fd, uint32_t plane_id)
         p->formats = malloc(2 * sizeof(uint32_t));
         if (p->formats) { p->formats[0] = DRM_FORMAT_XRGB8888;
                            p->formats[1] = DRM_FORMAT_ARGB8888; }
-        p->format_modifiers = NULL;
         break;
     case 2: /* cursor */
         p->count_formats = 1;
@@ -1645,7 +1644,6 @@ void drmModeFreePlane(drmModePlanePtr ptr)
 {
     if (!ptr) return;
     free(ptr->formats);
-    free(ptr->format_modifiers);
     free(ptr);
 }
 

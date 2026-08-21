@@ -688,8 +688,19 @@ static EGLDisplay shim_get_platform_display(EGLenum platform, void *native)
 {
     if (load_angle() < 0) return EGL_NO_DISPLAY;
 
+    /* Apple EGLNativeDisplayType is int; never funnel a gbm_device* through
+     * eglGetDisplay or the pointer is truncated. */
+    if (platform == EGL_PLATFORM_GBM_KHR) {
+        EGLShimDisplay *dpy = calloc(1, sizeof(*dpy));
+        if (!dpy) return EGL_NO_DISPLAY;
+        dpy->kind = EGL_SHIM_DISPLAY_GBM;
+        dpy->gbm_device = (struct gbm_device *)native;
+        dpy->angle_display = real_eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        return (EGLDisplay)dpy;
+    }
+
     if (platform != EGL_PLATFORM_WAYLAND_KHR)
-        return eglGetDisplay((EGLNativeDisplayType)native);
+        return eglGetDisplay((EGLNativeDisplayType)(uintptr_t)native);
 
 #ifdef ILAND_HAVE_WL_WINSYS
     if (!native) return EGL_NO_DISPLAY;
@@ -839,9 +850,16 @@ const char *eglQueryString(EGLDisplay dpy, EGLint name)
 #ifdef ILAND_HAVE_WL_WINSYS
             if (iland_wl_ops)
                 return "EGL_EXT_client_extensions EGL_EXT_platform_base "
-                       "EGL_KHR_platform_wayland EGL_EXT_platform_wayland";
+                       "EGL_KHR_platform_wayland EGL_EXT_platform_wayland "
+                       "EGL_KHR_platform_gbm EGL_MESA_platform_gbm "
+                       "EGL_EXT_platform_gbm";
 #endif
-            return "EGL_EXT_client_extensions EGL_EXT_platform_base";
+            /* Mode B / KMS: weston DRM asks for platform_gbm after
+             * EGL_EXT_platform_base (egl-glue.c). Advertise it so setup
+             * does not fail with "EGL does not support gbm platform". */
+            return "EGL_EXT_client_extensions EGL_EXT_platform_base "
+                   "EGL_KHR_platform_gbm EGL_MESA_platform_gbm "
+                   "EGL_EXT_platform_gbm";
         }
         if (name == EGL_VERSION)
             return "1.5";

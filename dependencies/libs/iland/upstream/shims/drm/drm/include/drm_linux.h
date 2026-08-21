@@ -311,13 +311,23 @@ int drmSetClientCap(int fd, uint64_t capability, uint64_t value);
 
 /* ── properties ───────────────────────────────────────────────────────── */
 
-#define DRM_MODE_PROP_RANGE         (1 << 0)
-#define DRM_MODE_PROP_ENUM          (1 << 1)
-#define DRM_MODE_PROP_BLOB          (1 << 2)
-#define DRM_MODE_PROP_BITMASK       (1 << 3)
-#define DRM_MODE_PROP_IMMUTABLE     (1 << 4)
-#define DRM_MODE_PROP_ATOMIC        (1 << 5)
-#define DRM_MODE_PROP_PENDING       (1 << 6)
+/* Match kernel uapi drm_mode.h / mesa libdrm (weston drm-backend). */
+#define DRM_MODE_PROP_PENDING       (1 << 0) /* deprecated */
+#define DRM_MODE_PROP_RANGE         (1 << 1)
+#define DRM_MODE_PROP_IMMUTABLE     (1 << 2)
+#define DRM_MODE_PROP_ENUM          (1 << 3)
+#define DRM_MODE_PROP_BLOB          (1 << 4)
+#define DRM_MODE_PROP_BITMASK       (1 << 5)
+#define DRM_MODE_PROP_LEGACY_TYPE   ( \
+		DRM_MODE_PROP_RANGE | \
+		DRM_MODE_PROP_ENUM | \
+		DRM_MODE_PROP_BLOB | \
+		DRM_MODE_PROP_BITMASK)
+#define DRM_MODE_PROP_EXTENDED_TYPE 0x0000ffc0
+#define DRM_MODE_PROP_TYPE(n)       ((n) << 6)
+#define DRM_MODE_PROP_OBJECT        DRM_MODE_PROP_TYPE(1)
+#define DRM_MODE_PROP_SIGNED_RANGE  DRM_MODE_PROP_TYPE(2)
+#define DRM_MODE_PROP_ATOMIC        0x80000000
 
 #define DRM_MODE_OBJECT_CRTC        0xCCCCCCCC
 #define DRM_MODE_OBJECT_CONNECTOR   0xC0C0C0C0
@@ -371,15 +381,20 @@ int                         drmModeDestroyPropertyBlob(int fd, uint32_t blob_id)
 #define DRM_PLANE_TYPE_PRIMARY   1
 #define DRM_PLANE_TYPE_CURSOR    2
 
+/* Match mesa libdrm xf86drmMode.h (weston drm-backend ABI). */
 typedef struct drmModePlane {
-    uint32_t  possible_crtcs;
-    uint32_t  gamma_size;
-    uint32_t  count_formats;
+    uint32_t count_formats;
     uint32_t *formats;
-    uint32_t  plane_id;
-    uint32_t  crtc_id;
-    uint32_t  fb_id;
-    uint64_t *format_modifiers;
+    uint32_t plane_id;
+
+    uint32_t crtc_id;
+    uint32_t fb_id;
+
+    uint32_t crtc_x, crtc_y;
+    uint32_t x, y;
+
+    uint32_t possible_crtcs;
+    uint32_t gamma_size;
 } drmModePlane, *drmModePlanePtr;
 
 typedef struct drmModePlaneRes {
