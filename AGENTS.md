@@ -31,6 +31,10 @@ Canonical prose (integration side):
 `Wawona/docs/iland-mode-a-b-desktop.md` and workspace rule
 `wawona-iland-mode-b-desktop`.
 
+Mode B CoreDisplay / SkyLight / `CAWindowServer` SPI (prototypes, ObjC
+encodings, 25F80 disasm, safe-call rules):
+`docs/mode-b/baremetal-display-spi-25F80.md`.
+
 ## Repo DAG layer (L1) — never invert
 
 `wwn-iland` is **L1: the complete Wawona graphics stack** (iland userland

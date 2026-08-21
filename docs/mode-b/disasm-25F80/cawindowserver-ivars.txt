@@ -1,0 +1,5 @@
+instance=0x196872d9d class=0x0 responds=1
+inst enc=v32@0:8^{__IOSurface=}16@24
+CAWindowServer ivars (2):
+  _impl type=^{CAWindowServerImpl=^{__CFArray}@I@?} offset=8
+  _mirroringEnabled type=B offset=16

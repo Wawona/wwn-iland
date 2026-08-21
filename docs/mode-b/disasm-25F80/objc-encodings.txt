@@ -1,0 +1,12 @@
+# Live ObjC encodings on macOS 26.5.1 / 25F80 (method_getTypeEncoding)
+CAWindowServer +serverWithOptions:  @24@0:8@16
+CAWindowServer +server              @16@0:8
+CAWindowServer +serverIfRunning     @16@0:8
+CAWindowServer -displays            @16@0:8
+CAWindowServerDisplay -presentSurface:withOptions:  v32@0:8^{__IOSurface=}16@24
+CAWindowServerDisplay -bounds       {CGRect={CGPoint=dd}{CGSize=dd}}16@0:8
+CAWindowServerDisplay -displayedSurface  ^{__IOSurface=}16@0:8
+CAWindowServerDisplay -framebufferFormat  I16@0:8
+CAWindowServerDisplay -setBlanked:  v20@0:8B16
+CAWindowServerDisplay -freeze       v16@0:8
+CAWindowServer ivar _impl  ^{CAWindowServerImpl=^{__CFArray}@I@?} offset=8

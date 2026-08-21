@@ -295,7 +295,12 @@ int main(void)
             return 0;
         }
 
-        /* ── Set up CAWindowServer display pipeline ──────────────────── */
+        /* ── Set up CAWindowServer display pipeline ────────────────────
+         *
+         * Private SPI catalog (params / encodings / safe-call rules):
+         *   docs/mode-b/baremetal-display-spi-25F80.md
+         * Match CoreBedtime order. Fail closed on missing symbols.
+         */
 
         /* a) Load private frameworks so SymRez can find them */
         dlopen("/System/Library/Frameworks/CoreDisplay.framework/Versions/A/CoreDisplay",
@@ -313,20 +318,39 @@ int main(void)
         symrez_t sr_cd = symrez_new(SR_CD);
         symrez_t sr_sl = symrez_new(SR_SL);
         symrez_t sr_qc = symrez_new(SR_QC);
+        if (!sr_cd || !sr_sl || !sr_qc) {
+            fprintf(stderr, "[framebufferd] FAIL: SymRez open CoreDisplay/"
+                            "SkyLight/QuartzCore\n");
+            return 1;
+        }
 
-        void  (*fn_SLSInit)(void)              = sr_resolve_symbol(sr_sl, "_SLSInitialize");
+        /* InitializeCoreDisplay copies 0x6b8 bytes from this table (25F80). */
+        void  (*fn_SLSInit)(void)               = sr_resolve_symbol(sr_sl, "_SLSInitialize");
         void  (*fn_InitCD)(const void *)        = sr_resolve_symbol(sr_cd, "_InitializeCoreDisplay");
         void  (*fn_DispDrvInit)(void)           = sr_resolve_symbol(sr_cd, "_CGXDisplayDriverInitialize");
-        void **p_WSCDCallbacks                  = sr_resolve_symbol(sr_sl, "_WSCDInitializeVtable.callbacks");
+        const void *p_WSCDCallbacks             = sr_resolve_symbol(sr_sl, "_WSCDInitializeVtable.callbacks");
         void **p_sessionCtrl                    = sr_resolve_symbol(sr_sl, "___sessionControlRef");
         void **p_g_server                       = sr_resolve_symbol(sr_sl, "__ZL9_g_server");
-        void  (*fn_CARenderServerRegister)(int) = sr_resolve_symbol(sr_sl, "_CARenderServerRegister");
+        /* QuartzCore: void CARenderServerRegister(const char *name); not called. */
+        void  (*fn_CARenderServerRegister)(const char *) =
+            sr_resolve_symbol(sr_sl, "_CARenderServerRegister");
         void **p_shared_server                  = sr_resolve_symbol(sr_qc, "__ZL14_shared_server");
         (void)fn_CARenderServerRegister;
 
         sr_free(sr_cd);
         sr_free(sr_sl);
         sr_free(sr_qc);
+
+        if (!fn_SLSInit || !fn_InitCD || !fn_DispDrvInit ||
+            !p_WSCDCallbacks || !p_sessionCtrl) {
+            fprintf(stderr,
+                    "[framebufferd] FAIL: required SPI unresolved "
+                    "SLS=%p InitCD=%p DispDrv=%p WSCD=%p sessionCtrl=%p\n",
+                    (void *)fn_SLSInit, (void *)fn_InitCD,
+                    (void *)fn_DispDrvInit, (void *)p_WSCDCallbacks,
+                    (void *)p_sessionCtrl);
+            return 1;
+        }
 
         /* c) Initialise SkyLight + CoreDisplay in order */
         fn_SLSInit();
@@ -337,6 +361,7 @@ int main(void)
         memset(fake_session_ctrl, 0, sizeof(fake_session_ctrl));
         memset(fake_cursor_ctrl,  0, sizeof(fake_cursor_ctrl));
 
+        /* Fake session graph offsets: 25F80-locked; see SPI doc. */
         *(void    **)(fake_sub_object  + 232) = fake_session_data;
         *(void    **)(fake_sub_object  + 176) = &fake_connections_ptr;
         *(void    **)(fake_sub_object  + 256) = fake_cursor_ctrl;
@@ -346,6 +371,10 @@ int main(void)
 
         fake_event_data = calloc(1, 0x1000);
         fake_event_caps = calloc(1, 0x100);
+        if (!fake_event_data || !fake_event_caps) {
+            fprintf(stderr, "[framebufferd] FAIL: fake event calloc\n");
+            return 1;
+        }
         *(void **)(fake_sub_object + 0xD0) = fake_event_data;
         *(void **)(fake_event_data + 0xA0) = fake_event_caps;
 
@@ -361,12 +390,21 @@ int main(void)
 
         /* ── Create CAWindowServer instance ─────────────────────────── */
         Class caWS = NSClassFromString(@"CAWindowServer");
+        if (!caWS) {
+            fprintf(stderr, "[framebufferd] FAIL: CAWindowServer class missing\n");
+            return 1;
+        }
         if (p_shared_server) *p_shared_server = NULL;
 
         id server = ((id(*)(id, SEL, id))objc_msgSend)(
             (id)caWS,
             NSSelectorFromString(@"serverWithOptions:"),
             @{@"fetchFrozenSurfaces": @YES});
+        if (!server) {
+            fprintf(stderr,
+                    "[framebufferd] FAIL: serverWithOptions: returned nil\n");
+            return 1;
+        }
 
         if (p_g_server) *p_g_server = (__bridge void *)server;
 
