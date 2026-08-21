@@ -28,6 +28,9 @@
 #define eglBindTexImage                angle_eglBindTexImage
 #define eglReleaseTexImage             angle_eglReleaseTexImage
 #define eglGetProcAddress              angle_eglGetProcAddress
+#define eglQueryContext                angle_eglQueryContext
+#define eglQuerySurface                angle_eglQuerySurface
+#define eglReleaseThread               angle_eglReleaseThread
 #endif
 
 #include <egl_shim.h>
@@ -93,6 +96,9 @@ const IlandWlOps *iland_wl_ops = NULL;
 #undef eglGetProcAddress
 #undef eglBindTexImage
 #undef eglReleaseTexImage
+#undef eglQueryContext
+#undef eglQuerySurface
+#undef eglReleaseThread
 #endif
 
 static void *g_angle_handle = NULL;
@@ -130,6 +136,9 @@ ANGLE_FN(eglCreatePbufferSurface);
 ANGLE_FN(eglCreatePbufferFromClientBuffer);
 ANGLE_FN(eglGetCurrentContext);
 ANGLE_FN(eglGetProcAddress);
+ANGLE_FN(eglQueryContext);
+ANGLE_FN(eglQuerySurface);
+ANGLE_FN(eglReleaseThread);
 /* typeof(&angle_eglBindTexImage) would require that symbol at link time on
  * some toolchains; visionOS ANGLE only exports the unprefixed names. */
 static EGLBoolean (*real_eglBindTexImage)(EGLDisplay, EGLSurface, EGLint) = NULL;
@@ -367,6 +376,9 @@ static int load_angle(void)
     LOAD(eglCreatePbufferFromClientBuffer);
     LOAD(eglGetCurrentContext);
     LOAD(eglGetProcAddress);
+    LOAD(eglQueryContext);
+    LOAD(eglQuerySurface);
+    LOAD(eglReleaseThread);
     /* Do not take &angle_eglBindTexImage — visionOS static ANGLE still exports
      * these two without the angle_ prefix, so a direct reference fails link.
      * Resolve via ANGLE's own GetProcAddress instead. */
@@ -521,6 +533,9 @@ static int load_angle(void)
     LOAD(eglCreatePbufferFromClientBuffer);
     LOAD(eglGetCurrentContext);
     LOAD(eglGetProcAddress);
+    LOAD(eglQueryContext);
+    LOAD(eglQuerySurface);
+    LOAD(eglReleaseThread);
     LOAD(eglBindTexImage);
     LOAD(eglReleaseTexImage);
 
@@ -777,6 +792,36 @@ EGLint eglGetError(void)
     return real_eglGetError();
 }
 
+EGLBoolean eglQueryContext(EGLDisplay dpy, EGLContext ctx, EGLint attribute,
+                           EGLint *value)
+{
+    WWN_REQUIRE_ANGLE(EGL_FALSE);
+    EGLShimDisplay *sd = unwrap_display(dpy);
+    if (!sd)
+        return real_eglQueryContext(dpy, ctx, attribute, value);
+    return real_eglQueryContext(sd->angle_display, ctx, attribute, value);
+}
+
+EGLBoolean eglQuerySurface(EGLDisplay dpy, EGLSurface surface, EGLint attribute,
+                           EGLint *value)
+{
+    WWN_REQUIRE_ANGLE(EGL_FALSE);
+    EGLShimDisplay *sd = unwrap_display(dpy);
+    EGLShimSurface *ss = unwrap_surface(surface);
+    if (!sd)
+        return real_eglQuerySurface(dpy, surface, attribute, value);
+    EGLSurface asurf = ss ? ss->angle_surface : surface;
+    return real_eglQuerySurface(sd->angle_display, asurf, attribute, value);
+}
+
+EGLBoolean eglReleaseThread(void)
+{
+    WWN_REQUIRE_ANGLE(EGL_FALSE);
+    if (!real_eglReleaseThread)
+        return EGL_TRUE;
+    return real_eglReleaseThread();
+}
+
 const char *eglQueryString(EGLDisplay dpy, EGLint name)
 {
     /*
@@ -785,13 +830,21 @@ const char *eglQueryString(EGLDisplay dpy, EGLint name)
      * eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, ...) — weston's
      * weston_platform_get_egl_display does exactly that, and without an answer
      * it falls back to eglGetDisplay and loses the platform distinction.
+     *
+     * Mode B (ILAND_NO_WL_WINSYS) still needs client extensions so weston
+     * DRM/GL does not fall through a NULL eglQueryString(EGL_NO_DISPLAY).
      */
     if (dpy == EGL_NO_DISPLAY) {
+        if (name == EGL_EXTENSIONS) {
 #ifdef ILAND_HAVE_WL_WINSYS
-        if (name == EGL_EXTENSIONS && iland_wl_ops)
-            return "EGL_EXT_client_extensions EGL_EXT_platform_base "
-                   "EGL_KHR_platform_wayland EGL_EXT_platform_wayland";
+            if (iland_wl_ops)
+                return "EGL_EXT_client_extensions EGL_EXT_platform_base "
+                       "EGL_KHR_platform_wayland EGL_EXT_platform_wayland";
 #endif
+            return "EGL_EXT_client_extensions EGL_EXT_platform_base";
+        }
+        if (name == EGL_VERSION)
+            return "1.5";
         return NULL;
     }
     if (!real_eglQueryString) return NULL;
@@ -2161,6 +2214,9 @@ static const struct {
     { "eglSwapBuffers",           (void *)eglSwapBuffers },
     { "eglSwapInterval",          (void *)eglSwapInterval },
     { "eglGetError",              (void *)eglGetError },
+    { "eglQueryContext",          (void *)eglQueryContext },
+    { "eglQuerySurface",          (void *)eglQuerySurface },
+    { "eglReleaseThread",         (void *)eglReleaseThread },
     { "eglGetProcAddress",        (void *)eglGetProcAddress },
     /* iland dma_buf import (EGL_EXT_image_dma_buf_import). ANGLE also answers
      * for these but knows nothing about iland's IOSurface-in-modifier scheme,
