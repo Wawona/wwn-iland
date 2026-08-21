@@ -4,3 +4,4 @@ result-*
 .DS_Store
 __pycache__/
 *.pyc
+hs_err_pid*.log
