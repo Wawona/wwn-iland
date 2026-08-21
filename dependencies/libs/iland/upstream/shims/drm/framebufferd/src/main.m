@@ -65,6 +65,9 @@ static void handle_signal(int sig)
 
 /* ── Present timer (main thread) ──────────────────────────────────────── */
 
+static volatile uint64_t g_present_count = 0;
+static volatile uint64_t g_flip_count = 0;
+
 static void TimerCallback(CFRunLoopTimerRef timer, void *info)
 {
     (void)timer; (void)info;
@@ -87,6 +90,16 @@ static void TimerCallback(CFRunLoopTimerRef timer, void *info)
          * The surface was created via DisplaySurface_create() with the
          * same format/properties as the display pipeline. */
         [g_display presentSurface:client withOptions:@{}];
+        uint64_t n = ++g_present_count;
+        if (n == 1 || (n % 60) == 0) {
+            fprintf(stderr,
+                    "[framebufferd] presentSurface n=%llu w=%zu h=%zu "
+                    "(WS still up ⇒ panel may not change; Classic needs "
+                    "WindowServer unloaded)\n",
+                    (unsigned long long)n,
+                    (size_t)IOSurfaceGetWidth(client),
+                    (size_t)IOSurfaceGetHeight(client));
+        }
         CFRelease(client);
         if (reply_port != MACH_PORT_NULL) {
             mach_msg_header_t ack = {0};
@@ -180,6 +193,11 @@ static void *mach_server_thread(void *arg)
             g_client_surface = client_surface;
             g_present_reply_port = msg.header.msgh_remote_port;
             g_dirty = true;
+            g_flip_count++;
+            if (g_flip_count == 1 || (g_flip_count % 60) == 0) {
+                fprintf(stderr, "[framebufferd] flip ipc n=%llu\n",
+                        (unsigned long long)g_flip_count);
+            }
             pthread_mutex_unlock(&g_surface_lock);
             request_present();
         } else {
