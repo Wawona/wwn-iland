@@ -350,6 +350,12 @@ int main(void)
         }
         printf("[framebufferd] CAWindowServer ready, display=%s\n",
                g_display ? "yes" : "no");
+        if (!g_display) {
+            fprintf(stderr,
+                    "[framebufferd] FAIL: no CAWindowServerDisplay after "
+                    "serverWithOptions (blank panel). Abort.\n");
+            return 1;
+        }
 
         fn_DispDrvInit();
         fprintf(stderr, "[framebufferd] CoreDisplay initialised\n");
