@@ -254,6 +254,29 @@ int main(void)
 
         printf("[framebufferd] listening on %s\n", DRM_IPC_SERVICE_NAME);
 
+        /*
+         * KEEP_WS probe: Aqua stays up. Claiming the panel via CoreDisplay /
+         * CAWindowServer blanks the only interactive display (2026-08-20).
+         * Register Mach for weston DRM IPC, but skip panel present.
+         */
+        if (getenv("WWN_MODEB_KEEP_WS") &&
+            getenv("WWN_MODEB_KEEP_WS")[0] != '\0' &&
+            strcmp(getenv("WWN_MODEB_KEEP_WS"), "0") != 0) {
+            fprintf(stderr,
+                    "[framebufferd] WWN_MODEB_KEEP_WS=1: Mach IPC only, "
+                    "no CoreDisplay panel claim\n");
+            g_main_run_loop = CFRunLoopGetCurrent();
+            CFRetain(g_main_run_loop);
+            pthread_t thread;
+            pthread_create(&thread, NULL, mach_server_thread, NULL);
+            pthread_detach(thread);
+            CFRunLoopRun();
+            CFRelease(g_main_run_loop);
+            g_main_run_loop = NULL;
+            g_running = false;
+            return 0;
+        }
+
         /* ── Set up CAWindowServer display pipeline ──────────────────── */
 
         /* a) Load private frameworks so SymRez can find them */
