@@ -15,12 +15,14 @@ static pthread_once_t g_present_ack_once = PTHREAD_ONCE_INIT;
 /*
  * After Classic unloads WindowServer, the compositor inherits a session
  * bootstrap subset. look_up of system MachServices then returns
- * KERN_EXCEPTION_PROTECTED (32). Walk bootstrap_parent to the root and
- * retry (2026-08-21 blank: MachServices check_in ok, present=0).
+ * KERN_EXCEPTION_PROTECTED (32). Walk bootstrap_parent; if look_up on
+ * each parent still fails, retarget TASK_BOOTSTRAP_PORT + bootstrap_port
+ * to the root and retry (2026-08-21 blank: present=0 after parent walk).
  */
 static kern_return_t drm_bootstrap_look_up(const char *name, mach_port_t *out)
 {
     mach_port_t bp = bootstrap_port;
+    mach_port_t root = bootstrap_port;
     kern_return_t kr = bootstrap_look_up(bp, (char *)name, out);
     if (kr == KERN_SUCCESS)
         return kr;
@@ -33,21 +35,40 @@ static kern_return_t drm_bootstrap_look_up(const char *name, mach_port_t *out)
         kern_return_t pkr = bootstrap_parent(bp, &parent);
         if (pkr != KERN_SUCCESS || parent == MACH_PORT_NULL ||
             parent == bp) {
+            fprintf(stderr, "[drm] bootstrap_parent stop depth=%d pkr=%d\n",
+                    depth, (int)pkr);
             break;
         }
-        if (bp != bootstrap_port)
+        if (bp != bootstrap_port && bp != root)
             mach_port_deallocate(mach_task_self(), bp);
         bp = parent;
+        root = parent;
         kr = bootstrap_look_up(bp, (char *)name, out);
+        fprintf(stderr, "[drm] look_up via parent depth=%d kr=%d %s\n",
+                depth, (int)kr, mach_error_string(kr));
         if (kr == KERN_SUCCESS) {
-            fprintf(stderr, "[drm] bootstrap_look_up %s ok via parent depth=%d\n",
-                    name, depth);
             if (bp != bootstrap_port)
                 mach_port_deallocate(mach_task_self(), bp);
             return KERN_SUCCESS;
         }
     }
-    if (bp != bootstrap_port)
+
+    /* Retarget this task onto the root bootstrap, then look_up again. */
+    if (root != MACH_PORT_NULL && root != bootstrap_port) {
+        kern_return_t skr =
+            task_set_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, root);
+        fprintf(stderr, "[drm] task_set_bootstrap_port root kr=%d\n", (int)skr);
+        if (skr == KERN_SUCCESS) {
+            bootstrap_port = root;
+            kr = bootstrap_look_up(bootstrap_port, (char *)name, out);
+            fprintf(stderr, "[drm] look_up after retarget kr=%d %s\n",
+                    (int)kr, mach_error_string(kr));
+            if (kr == KERN_SUCCESS)
+                return KERN_SUCCESS;
+        }
+    }
+
+    if (bp != bootstrap_port && bp != root)
         mach_port_deallocate(mach_task_self(), bp);
     return kr;
 }
