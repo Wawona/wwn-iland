@@ -506,8 +506,17 @@ static void wayland_mac_load(void) {
     }
 
 
-    /* Extract and launch inputd (input event daemon) unless already up. */
-    {
+    /*
+     * Same as framebufferd: after WS unload, bootstrap_look_up of the
+     * helper's launchd MachServices name fails. Spawning a second inputd
+     * then times out and kill -KILL that child. Classic 2026-08-22: that
+     * left igettyd unable to subscribe (invalid destination port) and
+     * blank fail-closed. When the helper armed modeb-mach.ready, do not
+     * look_up or spawn inputd.
+     */
+    if (framebufferd_already) {
+        wmac_log("[wayland-mac] helper-owned Mach; skipping inputd spawn");
+    } else {
         mach_port_t iport = MACH_PORT_NULL;
         kern_return_t ikr = bootstrap_look_up(bootstrap_port,
                                               "com.wayland-mac.inputd",
