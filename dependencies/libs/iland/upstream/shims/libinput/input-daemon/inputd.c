@@ -194,7 +194,8 @@ static pthread_mutex_t g_client_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void handle_signal(int sig)
 {
-    (void)sig;
+    fprintf(stderr, "[inputd] signal %d -> shutdown\n", sig);
+    fflush(stderr);
     g_running = false;
 }
 
@@ -726,13 +727,77 @@ static void iohid_event_callback(void *target, void *sender,
     }
 }
 
+static int env_truthy(const char *name)
+{
+    const char *v = getenv(name);
+    return v && v[0] != '\0' && strcmp(v, "0") != 0;
+}
+
+static int wait_for_path(const char *path, int tries, useconds_t us)
+{
+    int i;
+    for (i = 0; i < tries; i++) {
+        if (access(path, F_OK) == 0)
+            return 0;
+        usleep(us);
+    }
+    return -1;
+}
+
+/*
+ * Classic Mode B starts inputd (Mach) while Apple WindowServer is still up.
+ * IOHIDEventSystemCreate fails in that window (WS holds HID). Same as
+ * framebufferd DEFER_DISPLAY: wait for modeb-display-go (helper touches it
+ * only after WS bootout), then open HID. 2026-08-21: Create-failed-once
+ * left tty subscribed with zero keys / no Ctrl+Option escape → force reboot.
+ */
+static void maybe_defer_hid_until_ws_gone(void)
+{
+    const char *go = "/tmp/libwayland-support/modeb-display-go";
+
+    if (env_truthy("WWN_MODEB_KEEP_WS"))
+        return;
+    if (!env_truthy("WWN_MODEB_LAUNCHD") && !env_truthy("WWN_MODEB_DEFER_HID"))
+        return;
+
+    fprintf(stderr,
+            "[inputd] defer HID until %s (WS must be down before "
+            "IOHIDEventSystemCreate)\n",
+            go);
+    fflush(stderr);
+    if (wait_for_path(go, 240, 250000) != 0) {
+        fprintf(stderr, "[inputd] FAIL: timed out waiting for %s\n", go);
+        return;
+    }
+    fprintf(stderr, "[inputd] modeb-display-go seen; opening HID\n");
+    fflush(stderr);
+}
+
 static void *hid_thread(void *arg)
 {
     (void)arg;
 
-    g_hid_system = IOHIDEventSystemCreate(kCFAllocatorDefault);
+    maybe_defer_hid_until_ws_gone();
+
+    /* Retry: Create can race briefly after WS exit. */
+    {
+        int attempt;
+        g_hid_system = NULL;
+        for (attempt = 0; attempt < 40; attempt++) {
+            g_hid_system = IOHIDEventSystemCreate(kCFAllocatorDefault);
+            if (g_hid_system)
+                break;
+            fprintf(stderr,
+                    "[inputd] IOHIDEventSystemCreate failed (try %d)\n",
+                    attempt);
+            fflush(stderr);
+            usleep(250000);
+        }
+    }
     if (!g_hid_system) {
-        fprintf(stderr, "[inputd] IOHIDEventSystemCreate failed\n");
+        fprintf(stderr,
+                "[inputd] FAIL: IOHIDEventSystemCreate exhausted retries "
+                "(no keyboard; Mode B escape chords dead)\n");
         return NULL;
     }
 
@@ -746,6 +811,7 @@ static void *hid_thread(void *arg)
     }
 
     fprintf(stderr, "[inputd] IOHIDEventSystem capture started\n");
+    fflush(stderr);
 
     if (MTDeviceIsAvailable()) {
         g_mt_device = MTDeviceCreateDefault();
