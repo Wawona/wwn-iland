@@ -617,13 +617,18 @@ static void iohid_event_callback(void *target, void *sender,
     uint32_t type = IOHIDEventGetType(event);
     uint64_t ts   = IOHIDEventGetTimeStamp(event);
 
+    static int trace = -1;
+    if (trace < 0)
+        trace = getenv("WWN_INPUTD_TRACE") ? 1 : 0;
+
     /* Use IOHIDEventConformsTo like EventTranslator does — events may be
      * VendorDefined (type 1) but still conform to keyboard (3) or button (2). */
     int conforms_kb  = IOHIDEventConformsTo(event, kIOHIDEventTypeKeyboard);
     int conforms_btn = IOHIDEventConformsTo(event, kIOHIDEventTypeButton);
 
-    fprintf(stderr, "[inputd] IOHIDEvent type=%u (%s) conforms_kb=%d conforms_btn=%d ts=%llu\n",
-            type, iohid_event_type_name(type), conforms_kb, conforms_btn, ts);
+    if (trace)
+        fprintf(stderr, "[inputd] IOHIDEvent type=%u (%s) conforms_kb=%d conforms_btn=%d ts=%llu\n",
+                type, iohid_event_type_name(type), conforms_kb, conforms_btn, ts);
 
     /* Keyboard — check conforms first (covers VendorDefined wrapping keyboard) */
     if (conforms_kb) {
@@ -633,6 +638,7 @@ static void iohid_event_callback(void *target, void *sender,
         int pressed = (down != 0) ? 1 : 0;
         int evdev = hid_usage_to_evdev((uint32_t)usagePage, (uint32_t)usage);
         if (evdev > 0) {
+        if (trace)
             fprintf(stderr, "[inputd]   Keyboard: page=0x%x usage=0x%x evdev=%d down=%d pressed=%d\n",
                     usagePage, usage, evdev, (int)down, pressed);
             send_key_event(ts, evdev, pressed);
@@ -693,7 +699,8 @@ static void iohid_event_callback(void *target, void *sender,
     case kIOHIDEventTypeTranslation: {
         float dx = IOHIDEventGetFloatValue(event, kIOHIDEventFieldTranslationX);
         float dy = IOHIDEventGetFloatValue(event, kIOHIDEventFieldTranslationY);
-        fprintf(stderr, "[inputd]   Translation: dx=%.2f dy=%.2f\n", dx, dy);
+        if (trace)
+            fprintf(stderr, "[inputd]   Translation: dx=%.2f dy=%.2f\n", dx, dy);
         if (dx != 0.0f || dy != 0.0f)
             accum_motion((double)dx, (double)dy);
         break;
@@ -701,7 +708,8 @@ static void iohid_event_callback(void *target, void *sender,
     case kIOHIDEventTypeScroll: {
         float sx = IOHIDEventGetFloatValue(event, kIOHIDEventFieldScrollX);
         float sy = IOHIDEventGetFloatValue(event, kIOHIDEventFieldScrollY);
-        fprintf(stderr, "[inputd]   Scroll: sx=%.2f sy=%.2f\n", sx, sy);
+        if (trace)
+            fprintf(stderr, "[inputd]   Scroll: sx=%.2f sy=%.2f\n", sx, sy);
         if (sy != 0.0f) send_scroll_event(ts, 0, (double)sy);
         if (sx != 0.0f) send_scroll_event(ts, 1, (double)sx);
         break;
@@ -709,7 +717,8 @@ static void iohid_event_callback(void *target, void *sender,
     case kIOHIDEventTypeMouse: {
         float mx = IOHIDEventGetFloatValue(event, kIOHIDEventFieldMouseX);
         float my = IOHIDEventGetFloatValue(event, kIOHIDEventFieldMouseY);
-        fprintf(stderr, "[inputd]   Mouse: x=%.2f y=%.2f\n", mx, my);
+        if (trace)
+            fprintf(stderr, "[inputd]   Mouse: x=%.2f y=%.2f\n", mx, my);
         if (mx != 0.0f || my != 0.0f)
             accum_motion((double)mx, (double)my);
         break;
@@ -718,8 +727,9 @@ static void iohid_event_callback(void *target, void *sender,
         float tx = IOHIDEventGetFloatValue(event, kIOHIDEventFieldDigitizerX);
         float ty = IOHIDEventGetFloatValue(event, kIOHIDEventFieldDigitizerY);
         int32_t touch = IOHIDEventGetIntegerValue(event, kIOHIDEventFieldDigitizerTouch);
-        fprintf(stderr, "[inputd]   Digitizer: x=%.4f y=%.4f touch=%d\n",
-                tx, ty, touch);
+        if (trace)
+            fprintf(stderr, "[inputd]   Digitizer: x=%.4f y=%.4f touch=%d\n",
+                    tx, ty, touch);
         break;
     }
     default:
