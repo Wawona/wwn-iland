@@ -70,6 +70,63 @@ static void handle_signal(int sig)
 
 static volatile uint64_t g_present_count = 0;
 static volatile uint64_t g_flip_count = 0;
+static IOSurfaceRef g_bounce_surface[2];
+static int g_bounce_i;
+static size_t g_bounce_w;
+static size_t g_bounce_h;
+static IOSurfaceID g_last_client_id;
+
+/* CAWindowServerDisplay presentSurface of the same IOSurface object is a
+ * no-op. kmscube/GBM flip distinct BOs so they stay visible. fbcon / igettyd
+ * mmap one dumb BO and pageflip it after CPU writes: the first flip (banner)
+ * shows, later putcs do not. Ping-pong a bounce copy when the client id
+ * repeats so CoreDisplay always gets a new object. */
+static IOSurfaceRef surface_for_present(IOSurfaceRef client)
+{
+    if (!client)
+        return NULL;
+    IOSurfaceID sid = IOSurfaceGetID(client);
+    size_t w = IOSurfaceGetWidth(client);
+    size_t h = IOSurfaceGetHeight(client);
+    if (sid != g_last_client_id) {
+        g_last_client_id = sid;
+        return client;
+    }
+    if (g_bounce_w != w || g_bounce_h != h) {
+        for (int i = 0; i < 2; i++) {
+            if (g_bounce_surface[i]) {
+                CFRelease(g_bounce_surface[i]);
+                g_bounce_surface[i] = NULL;
+            }
+        }
+        g_bounce_w = w;
+        g_bounce_h = h;
+    }
+    int slot = g_bounce_i ^ 1;
+    if (!g_bounce_surface[slot]) {
+        DisplaySurfaceInfo dsi =
+            DisplaySurface_create((uint32_t)w, (uint32_t)h, kWSPixelFormatBGRA);
+        g_bounce_surface[slot] = dsi.surface;
+    }
+    IOSurfaceRef bounce = g_bounce_surface[slot];
+    if (!bounce)
+        return client;
+    IOSurfaceLock(client, kIOSurfaceLockReadOnly, NULL);
+    IOSurfaceLock(bounce, 0, NULL);
+    const uint8_t *src = IOSurfaceGetBaseAddress(client);
+    uint8_t *dst = IOSurfaceGetBaseAddress(bounce);
+    size_t src_bpr = IOSurfaceGetBytesPerRow(client);
+    size_t dst_bpr = IOSurfaceGetBytesPerRow(bounce);
+    size_t row = src_bpr < dst_bpr ? src_bpr : dst_bpr;
+    if (src && dst && row > 0) {
+        for (size_t y = 0; y < h; y++)
+            memcpy(dst + y * dst_bpr, src + y * src_bpr, row);
+    }
+    IOSurfaceUnlock(bounce, 0, NULL);
+    IOSurfaceUnlock(client, kIOSurfaceLockReadOnly, NULL);
+    g_bounce_i = slot;
+    return bounce;
+}
 
 static void TimerCallback(CFRunLoopTimerRef timer, void *info)
 {
@@ -89,10 +146,8 @@ static void TimerCallback(CFRunLoopTimerRef timer, void *info)
 
         if (!client) return;
 
-        /* Directly present the client surface — no compositing needed.
-         * The surface was created via DisplaySurface_create() with the
-         * same format/properties as the display pipeline. */
-        [g_display presentSurface:client withOptions:@{}];
+        IOSurfaceRef frame = surface_for_present(client);
+        [g_display presentSurface:frame withOptions:@{}];
         uint64_t n = ++g_present_count;
         if (n == 1 || (n % 60) == 0) {
             fprintf(stderr,

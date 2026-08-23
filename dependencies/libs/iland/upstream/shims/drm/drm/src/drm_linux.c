@@ -889,6 +889,19 @@ static IOSurfaceRef fb_id_to_surface(uint32_t fb_id)
     return NULL;
 }
 
+/* True when this FB is a CPU-mapped dumb BO (fbcon / igettyd), not GBM. */
+static int fb_is_dumb(uint32_t fb_id)
+{
+    IOSurfaceRef surf = fb_id_to_surface(fb_id);
+    if (!surf)
+        return 0;
+    for (int i = 0; i < MAX_DUMB_BUFS; i++) {
+        if (g_dumb[i].handle && g_dumb[i].surface == surf)
+            return 1;
+    }
+    return 0;
+}
+
 /* ── mode set + page flip ─────────────────────────────────────────────── */
 
 int drmModeSetCrtc(int fd, uint32_t crtc_id, uint32_t fb_id,
@@ -920,6 +933,15 @@ int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
     g_state.crtc_fb_id = fb_id;
 
     IOSurfaceRef surf = fb_id_to_surface(fb_id);
+
+    /* CPU raster (Mode B tty) writes the dumb mapping without holding
+     * IOSurfaceLock. Unlock/relock publishes those stores so CoreDisplay
+     * and a framebufferd bounce copy see the new cells. Do not do this
+     * for GBM scanout: the GPU owns that surface. */
+    if (surf && fb_is_dumb(fb_id)) {
+        IOSurfaceLock(surf, 0, NULL);
+        IOSurfaceUnlock(surf, 0, NULL);
+    }
 
 #if defined(__ANDROID__)
     /* #140: if this scanout buffer is backed by a CPU-fallback EGLImage (the
