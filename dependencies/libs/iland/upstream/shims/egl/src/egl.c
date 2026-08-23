@@ -265,6 +265,22 @@ typedef void *EGLImageKHR;
 #define EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT  0x3444
 #endif
 
+/* Same fourccs and IOSurface-in-modifier convention as Wawona's
+ * zwp_linux_dmabuf_v1 bind (linux_dmabuf.rs). High bit set, IOSurface id in
+ * the low 63 bits. LINEAR is not advertised. */
+#ifndef DRM_FORMAT_ARGB8888
+#define DRM_FORMAT_ARGB8888                 0x34325241u
+#endif
+#ifndef DRM_FORMAT_XRGB8888
+#define DRM_FORMAT_XRGB8888                 0x34325258u
+#endif
+#define ILAND_IOSURFACE_MODIFIER            0x8000000000000000ULL
+
+static const EGLint kIlandDmabufFormats[] = {
+    (EGLint)DRM_FORMAT_ARGB8888,
+    (EGLint)DRM_FORMAT_XRGB8888,
+};
+
 /* Set once at first surface creation from $ILAND_EGL_ZEROCOPY. */
 static int g_zerocopy_enabled = -1;
 
@@ -494,9 +510,11 @@ static int load_angle(void)
      * that carry no Wawona rpath.
      */
     static const char *candidates[] = {
-        "@rpath/libEGL.dylib",
-        "@executable_path/../Frameworks/libEGL.dylib",
-        "@executable_path/Frameworks/libEGL.dylib",
+        /* Public libEGL.dylib in Wawona.app is the iland Wayland-EGL shim.
+         * ANGLE is renamed libEGL_angle.dylib so this dlopen cannot recurse. */
+        "@rpath/libEGL_angle.dylib",
+        "@executable_path/../Frameworks/libEGL_angle.dylib",
+        "@executable_path/Frameworks/libEGL_angle.dylib",
         "/opt/local/lib/libEGL.dylib",
         NULL,
     };
@@ -2225,6 +2243,58 @@ EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval)
  * the definition. */
 __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *procname);
 
+EGLBoolean eglQueryDmaBufFormatsEXT(EGLDisplay dpy, EGLint max_formats,
+                                    EGLint *formats, EGLint *num_formats)
+{
+    const EGLint n = (EGLint)(sizeof(kIlandDmabufFormats) /
+                              sizeof(kIlandDmabufFormats[0]));
+    (void)dpy;
+    if (num_formats)
+        *num_formats = n;
+    if (max_formats == 0)
+        return EGL_TRUE;
+    if (max_formats < 0 || !formats)
+        return EGL_FALSE;
+    EGLint copy = max_formats < n ? max_formats : n;
+    for (EGLint i = 0; i < copy; i++)
+        formats[i] = kIlandDmabufFormats[i];
+    return EGL_TRUE;
+}
+
+EGLBoolean eglQueryDmaBufModifiersEXT(EGLDisplay dpy, EGLint format,
+                                      EGLint max_modifiers,
+                                      uint64_t *modifiers,
+                                      EGLBoolean *external_only,
+                                      EGLint *num_modifiers)
+{
+    int supported = 0;
+    const EGLint nfmt = (EGLint)(sizeof(kIlandDmabufFormats) /
+                                 sizeof(kIlandDmabufFormats[0]));
+    (void)dpy;
+    for (EGLint i = 0; i < nfmt; i++) {
+        if (format == kIlandDmabufFormats[i]) {
+            supported = 1;
+            break;
+        }
+    }
+    if (!supported) {
+        if (num_modifiers)
+            *num_modifiers = 0;
+        return EGL_TRUE;
+    }
+    if (num_modifiers)
+        *num_modifiers = 1;
+    if (max_modifiers == 0)
+        return EGL_TRUE;
+    if (max_modifiers < 0)
+        return EGL_FALSE;
+    if (modifiers && max_modifiers >= 1)
+        modifiers[0] = ILAND_IOSURFACE_MODIFIER;
+    if (external_only && max_modifiers >= 1)
+        external_only[0] = EGL_FALSE;
+    return EGL_TRUE;
+}
+
 static const struct {
     const char *name;
     void *fn;
@@ -2261,6 +2331,9 @@ static const struct {
      * so a client resolving them dynamically must get the shim's versions. */
     { "eglCreateImageKHR",        (void *)eglCreateImageKHR },
     { "eglDestroyImageKHR",       (void *)eglDestroyImageKHR },
+    { "eglQueryDmaBufFormatsEXT", (void *)eglQueryDmaBufFormatsEXT },
+    { "eglQueryDmaBufModifiersEXT",
+      (void *)eglQueryDmaBufModifiersEXT },
     { "glEGLImageTargetTexture2DOES",
       (void *)glEGLImageTargetTexture2DOES },
 };

@@ -7,6 +7,8 @@
 #   displaysurface  IOSurface creation (WSPixelFormat / CAWindowServer-compatible)
 #   gbm             Generic Buffer Management backed by IOSurface
 #   egl             EGL/GLES entrypoints wrapping ANGLE (nixpkgs#angle)
+#   libEGL.dylib    Public EGL ABI (Wayland-EGL winsys + dma_buf query).
+#                   Nested niri/weston dlopen this; ANGLE is libEGL_angle.dylib.
 #   drm             DRM/KMS userland API (drmMode*, gbm handle registry)
 #
 # Mode B (Dobby code injection, framebufferd/SkyLight, AMFI bypass, inputd) is
@@ -145,6 +147,22 @@ pkgs.stdenv.mkDerivation {
 
     "$AR" rcs libiland_wayland_egl.a iland_wayland_egl.o
 
+    # Public EGL ABI for nested compositors (niri, weston gl-renderer) that
+    # dlopen libEGL.dylib. ANGLE is a private image (libEGL_angle.dylib) the
+    # shim load_angle() opens. Do not LC_LOAD ANGLE here.
+    echo "CC libEGL.dylib (iland Wayland-EGL shim)"
+    "$CLANG" -dynamiclib -o libEGL.dylib \
+      -isysroot "$SDKROOT" -mmacosx-version-min=12.0 \
+      -Wl,-force_load,libiland_userland.a \
+      -Wl,-force_load,libiland_wayland_egl.a \
+      -L${libwayland}/lib -lwayland-client \
+      -framework IOSurface -framework Foundation -framework CoreFoundation \
+      -framework CoreGraphics -framework Accelerate -framework QuartzCore \
+      -framework Metal \
+      -lobjc \
+      -install_name @rpath/libEGL.dylib \
+      -compatibility_version 1 -current_version 1
+
     # Vulkan Wayland WSI (VK_KHR_wayland_surface + swapchain over the same
     # IOSurface dmabuf winsys). Separate archive so GLES-only clients skip it.
     VK_WL_CFLAGS="$COMMON_FLAGS -Ishims/vulkan-wayland/include -I${pkgs.vulkan-headers}/include"
@@ -162,6 +180,7 @@ pkgs.stdenv.mkDerivation {
     cp libiland_userland.a $out/lib/
     cp libiland_wayland_egl.a $out/lib/
     cp libiland_wayland_vulkan.a $out/lib/
+    cp libEGL.dylib $out/lib/
 
     # Public client-facing headers
     cp shims/gbm/include/gbm.h                       $out/include/
