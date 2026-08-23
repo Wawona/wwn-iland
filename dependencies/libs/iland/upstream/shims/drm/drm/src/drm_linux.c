@@ -616,6 +616,8 @@ typedef struct dumb_buf {
     uint32_t    bpp;
     uint32_t    pitch;
     size_t      size;
+    /* CPU shadow. Clients write here. PageFlip memcpy's into the IOSurface
+     * under lock. GetBaseAddress after Unlock is not a stable scanout map. */
     void       *map;
 } dumb_buf_t;
 
@@ -665,10 +667,12 @@ int drmModeCreateDumbBuffer(int fd, uint32_t width, uint32_t height,
     uint32_t p   = (uint32_t)IOSurfaceGetBytesPerRow(surf);
     size_t   sz  = (size_t)IOSurfaceGetAllocSize(surf);
 
-    /* Lock and get base address so the compositor can write pixels */
-    IOSurfaceLock(surf, 0, NULL);
-    void *base = IOSurfaceGetBaseAddress(surf);
-    IOSurfaceUnlock(surf, 0, NULL);
+    void *cpu = calloc(1, sz);
+    if (!cpu) {
+        CFRelease(surf);
+        errno = ENOMEM;
+        return -1;
+    }
 
     uint32_t h = g_next_dumb_handle++;
     g_dumb[slot] = (dumb_buf_t){
@@ -679,7 +683,7 @@ int drmModeCreateDumbBuffer(int fd, uint32_t width, uint32_t height,
         .bpp     = bpp,
         .pitch   = p,
         .size    = sz,
-        .map     = base,
+        .map     = cpu,
     };
 
     if (handle) *handle = h;
@@ -693,6 +697,7 @@ int drmModeDestroyDumbBuffer(int fd, uint32_t handle)
     if (check_fd(fd) < 0) return -1;
     for (int i = 0; i < MAX_DUMB_BUFS; i++) {
         if (g_dumb[i].handle == handle) {
+            free(g_dumb[i].map);
             if (g_dumb[i].surface) {
                 CFRelease(g_dumb[i].surface);
             }
@@ -934,13 +939,19 @@ int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
 
     IOSurfaceRef surf = fb_id_to_surface(fb_id);
 
-    /* CPU raster (Mode B tty) writes the dumb mapping without holding
-     * IOSurfaceLock. Unlock/relock publishes those stores so CoreDisplay
-     * and a framebufferd bounce copy see the new cells. Do not do this
-     * for GBM scanout: the GPU owns that surface. */
+    /* CPU raster writes the malloc shadow. Copy into the IOSurface under
+     * lock so CoreDisplay sees new cells. Do not do this for GBM scanout. */
     if (surf && fb_is_dumb(fb_id)) {
-        IOSurfaceLock(surf, 0, NULL);
-        IOSurfaceUnlock(surf, 0, NULL);
+        for (int i = 0; i < MAX_DUMB_BUFS; i++) {
+            if (!g_dumb[i].handle || g_dumb[i].surface != surf)
+                continue;
+            IOSurfaceLock(surf, 0, NULL);
+            void *dst = IOSurfaceGetBaseAddress(surf);
+            if (dst && g_dumb[i].map && dst != g_dumb[i].map)
+                memcpy(dst, g_dumb[i].map, g_dumb[i].size);
+            IOSurfaceUnlock(surf, 0, NULL);
+            break;
+        }
     }
 
 #if defined(__ANDROID__)
