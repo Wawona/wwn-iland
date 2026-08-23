@@ -1001,6 +1001,16 @@ EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx)
     return real_eglDestroyContext(sd->angle_display, ctx);
 }
 
+EGLSurface eglCreatePbufferSurface(EGLDisplay dpy, EGLConfig config,
+                                   const EGLint *attrib_list)
+{
+    WWN_REQUIRE_ANGLE(EGL_NO_SURFACE);
+    EGLShimDisplay *sd = unwrap_display(dpy);
+    if (!sd)
+        return real_eglCreatePbufferSurface(dpy, config, attrib_list);
+    return real_eglCreatePbufferSurface(sd->angle_display, config, attrib_list);
+}
+
 /* ANGLE's rectangle texture target (CGL / older macOS ANGLE). Metal ANGLE
  * reports EGL_TEXTURE_2D via EGL_BIND_TO_TEXTURE_TARGET_ANGLE instead. */
 #define WWN_GL_TEXTURE_RECTANGLE            0x84F5
@@ -2204,7 +2214,12 @@ EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval)
  * too, with its own versions, which know nothing about gbm surfaces or
  * EGL_PLATFORM_WAYLAND — a client that resolves them dynamically would escape
  * the shim and get NULL displays. weston-simple-egl does exactly that, via
- * shared/platform.h's eglGetProcAddress("eglGetPlatformDisplayEXT"). */
+ * shared/platform.h's eglGetProcAddress("eglGetPlatformDisplayEXT").
+ *
+ * smithay / khronos-egl (nested niri) load core EGL 1.5 via GetProcAddress
+ * as well. Without eglCreateContext here, ChooseConfig went through the shim
+ * (valid ANGLE display) then CreateContext hit ANGLE with the shim pointer
+ * and failed EGL_BAD_DISPLAY. */
 /* Forward decl: under ILAND_ANGLE_STATIC the ANGLE rename/#undef leaves no
  * prototype from <EGL/egl.h>, and the table below takes our address before
  * the definition. */
@@ -2221,7 +2236,12 @@ static const struct {
     { "eglTerminate",             (void *)eglTerminate },
     { "eglQueryString",           (void *)eglQueryString },
     { "eglChooseConfig",          (void *)eglChooseConfig },
+    { "eglGetConfigs",            (void *)eglGetConfigs },
     { "eglGetConfigAttrib",       (void *)eglGetConfigAttrib },
+    { "eglBindAPI",               (void *)eglBindAPI },
+    { "eglCreateContext",         (void *)eglCreateContext },
+    { "eglDestroyContext",        (void *)eglDestroyContext },
+    { "eglCreatePbufferSurface",  (void *)eglCreatePbufferSurface },
     { "eglCreateWindowSurface",   (void *)eglCreateWindowSurface },
     { "eglCreatePlatformWindowSurface",
       (void *)eglCreatePlatformWindowSurface },
