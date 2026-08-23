@@ -469,7 +469,8 @@ static int modeb_chord_filter(int evdev_key, int pressed)
         modeb_request_restore_aqua();
         return 1;
     }
-    if (evdev_key >= KEY_F1 && evdev_key <= KEY_F7) {
+    /* F1-F6 text/GUI VTs. F7-F9 overlay KMS clients (kmscube, gbm-es2, vkcube-kms). */
+    if (evdev_key >= KEY_F1 && evdev_key <= KEY_F9) {
         modeb_write_vt(evdev_key - KEY_F1 + 1);
         return 1;
     }
