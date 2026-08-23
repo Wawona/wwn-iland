@@ -778,6 +778,9 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
         sd->wl_winsys = iland_wl_ops->winsys_create(sd->wl_display);
         if (!sd->wl_winsys)
             return EGL_FALSE;
+        fprintf(stderr,
+                "iland: EGL_PLATFORM_WAYLAND (linux-dmabuf winsys). "
+                "ANGLE is the GLES driver, not GBM/KMS.\n");
     }
 #endif
 
@@ -1625,9 +1628,17 @@ static EGLSurface zc_render_pbuffer(EGLShimDisplay *sd, EGLShimSurface *ss)
     if (real_eglGetConfigAttrib)
         real_eglGetConfigAttrib(sd->angle_display, ss->config,
                                 EGL_DEPTH_SIZE, &depth);
-    fprintf(stderr, "iland: rendering into a %ux%u pbuffer, depth %d bits, "
-                    "blitting to the presented IOSurface\n",
-            ss->width, ss->height, depth);
+    if (ss->wayland)
+        fprintf(stderr,
+                "iland: Wayland-EGL %ux%u: ANGLE GLES pbuffer (depth %d) "
+                "blitted to IOSurface, posted as linux-dmabuf on the "
+                "wl_surface (not GBM/KMS)\n",
+                ss->width, ss->height, depth);
+    else
+        fprintf(stderr,
+                "iland: GBM/KMS %ux%u: ANGLE GLES pbuffer (depth %d) "
+                "blitted to the presented IOSurface\n",
+                ss->width, ss->height, depth);
     ss->render_pbuffer = pb;
     return pb;
 }
@@ -1832,8 +1843,24 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     if (!sd) return real_eglCreateWindowSurface(dpy, config, win, attrib_list);
 
 #ifdef ILAND_HAVE_WL_WINSYS
-    if (sd->kind == EGL_SHIM_DISPLAY_WAYLAND) {
+    /* A wl_egl_window is never a gbm_surface. weston-simple-egl (and any
+     * client that follows shared/platform.h) wants EGL_PLATFORM_WAYLAND;
+     * if it fell through eglGetDisplay(wl_display) the wrapper is tagged
+     * GBM and the native display pointer was stashed as gbm_device. Recover
+     * that instead of page-flipping KMS. */
+    if (iland_wl_ops &&
+        iland_wl_egl_window_is_valid((struct wl_egl_window *)win)) {
         struct wl_egl_window *wlwin = (struct wl_egl_window *)win;
+        if (sd->kind != EGL_SHIM_DISPLAY_WAYLAND) {
+            fprintf(stderr,
+                    "iland: native window is wl_egl_window; using "
+                    "EGL_PLATFORM_WAYLAND (not GBM/KMS)\n");
+            sd->kind = EGL_SHIM_DISPLAY_WAYLAND;
+            if (!sd->wl_display)
+                sd->wl_display = (struct wl_display *)sd->gbm_device;
+            if (!sd->wl_winsys && sd->wl_display)
+                sd->wl_winsys = iland_wl_ops->winsys_create(sd->wl_display);
+        }
         if (!sd->wl_winsys || !iland_wl_egl_window_is_valid(wlwin))
             return EGL_NO_SURFACE;
 

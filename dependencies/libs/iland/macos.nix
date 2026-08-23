@@ -1,8 +1,9 @@
 # iland userland core for macOS (Mode A — in-window, App-Store-safe shape).
 #
 # Builds the IOSurface/ANGLE-backed Linux-graphics compat shims as a single
-# static archive (libiland_userland.a) that Wayland/Weston GL clients
-# (kmscube, es2gears, weston-simple-egl) link against:
+# static archive (libiland_userland.a). KMS/GBM clients (kmscube, es2gears)
+# link that. Wayland-EGL clients (weston-simple-egl, opengl-cube) also link
+# libiland_wayland_egl.a (wl_egl_window + linux-dmabuf, not the KMS presenter):
 #
 #   displaysurface  IOSurface creation (WSPixelFormat / CAWindowServer-compatible)
 #   gbm             Generic Buffer Management backed by IOSurface
