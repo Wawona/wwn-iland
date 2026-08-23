@@ -7,33 +7,65 @@
 #include <mach/mach_vm.h>
 #include <objc/runtime.h>
 #include <ptrauth.h>
+#include <servers/bootstrap.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define MFI_FRAMEWORK \
     "/System/Library/PrivateFrameworks/MobileFileIntegrity.framework/MobileFileIntegrity"
+#define MFI_MACH_NAME "com.apple.MobileFileIntegrity"
+#define AMFID_WAIT_TRIES 50
+#define AMFID_WAIT_US 100000
 
-/* ── find amfid's PID ─────────────────────────────────────────────────── */
+/* On macOS 26 amfid is an on-demand LaunchDaemon. It idle-jetsams
+ * (JETSAM_REASON_MEMORY_IDLE_EXIT). An infinite wait here blocks Classic
+ * Take Over before framebufferd / igettyd ever start. */
 
 static pid_t
 find_amfid_pid(void)
 {
-    int n = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0) / sizeof(pid_t);
-    pid_t *pids = calloc(n, sizeof(pid_t));
-    n = proc_listpids(PROC_ALL_PIDS, 0, pids, n * sizeof(pid_t)) / sizeof(pid_t);
-
+    int n = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0) / (int)sizeof(pid_t);
+    pid_t *pids;
     pid_t result = -1;
-    for (int i = 0; i < n; i++) {
+    int i;
+
+    if (n < 1)
+        n = 512;
+    pids = calloc((size_t)n, sizeof(pid_t));
+    if (pids == NULL)
+        return -1;
+    n = proc_listpids(PROC_ALL_PIDS, 0, pids, n * (int)sizeof(pid_t)) /
+        (int)sizeof(pid_t);
+
+    for (i = 0; i < n; i++) {
         char path[PROC_PIDPATHINFO_MAXSIZE];
-        if (proc_pidpath(pids[i], path, sizeof(path)) > 0) {
-            if (strcmp(path, "/usr/libexec/amfid") == 0) {
-                result = pids[i];
-                break;
-            }
+        const char *base;
+
+        if (proc_pidpath(pids[i], path, sizeof(path)) <= 0)
+            continue;
+        base = strrchr(path, '/');
+        base = base ? base + 1 : path;
+        if (strcmp(path, "/usr/libexec/amfid") == 0 || strcmp(base, "amfid") == 0) {
+            result = pids[i];
+            break;
         }
     }
     free(pids);
     return result;
+}
+
+static void
+demand_start_amfid(void)
+{
+    mach_port_t port = MACH_PORT_NULL;
+    kern_return_t kr = bootstrap_look_up(bootstrap_port, MFI_MACH_NAME, &port);
+
+    if (kr == KERN_SUCCESS && MACH_PORT_VALID(port))
+        mach_port_deallocate(mach_task_self(), port);
+    else
+        fprintf(stderr,
+                "[amfid_handler] demand-start %s kr=0x%x\n", MFI_MACH_NAME, kr);
 }
 
 /* ── patch state (preserved for unpatch) ──────────────────────────────── */
@@ -271,13 +303,26 @@ install_hook(task_t task, mach_vm_address_t fn_addr)
 void
 amfid_patch(void)
 {
-    pid_t pid;
-FindAMFI:
-    pid = find_amfid_pid();
+    pid_t pid = -1;
+    int i;
+
+    demand_start_amfid();
+    for (i = 0; i < AMFID_WAIT_TRIES; i++) {
+        pid = find_amfid_pid();
+        if (pid >= 0)
+            break;
+        if (i == 0 || (i % 10) == 0)
+            fprintf(stderr, "[amfid_handler] amfid not found, try %d/%d\n",
+                    i + 1, AMFID_WAIT_TRIES);
+        usleep(AMFID_WAIT_US);
+        if ((i % 10) == 9)
+            demand_start_amfid();
+    }
     if (pid < 0) {
-        fprintf(stderr, "[amfid_handler] amfid not found, trying again in a few\n");
-        usleep(1666);
-        goto FindAMFI;
+        fprintf(stderr,
+                "[amfid_handler] amfid idle/absent after %d ms; skip hook "
+                "(SIP-off adhoc helpers continue)\n",
+                AMFID_WAIT_TRIES * (AMFID_WAIT_US / 1000));
         return;
     }
 
