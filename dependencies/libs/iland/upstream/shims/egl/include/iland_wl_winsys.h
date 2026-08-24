@@ -43,7 +43,7 @@ extern "C" {
  * dispatches (or steals) the client's own events. NULL when the compositor
  * does not offer dmabuf, which is the caller's cue to fail surface creation
  * rather than silently render nowhere. */
-/* Swapchain orientation. Wayland clients (GLES blit dest-Y flip, GLES
+/* Swapchain orientation. Wayland clients (GLES row reverse after blit, GLES
  * glReadPixels row reverse, Vulkan staging) write top-down; use TOP_DOWN so
  * the compositor does not Y-flip again. BOTTOM_UP is only for a producer that
  * really stores GL's bottom-up rows and cannot flip itself. */
