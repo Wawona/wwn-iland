@@ -128,14 +128,10 @@ static int hooked_open(const char *path, int flags, ...)
     int mode = (flags & O_CREAT) ? va_arg(ap, int) : 0;
     va_end(ap);
 
-    if (path && strncmp(path, "/dev/dri/", 9) == 0) {
-        const char *rest = path + 9;
-        if (strncmp(rest, "card", 4) == 0 &&
-            rest[4] >= '0' && rest[4] <= '9')
-            return DRM_VIRTUAL_FD;
-        errno = ENODEV;
-        return -1;
-    }
+    /* iland userspace DRM. Never a real kernel node. card* and renderD*
+     * both map to the virtual fd so niri/weston TTY backends match Linux. */
+    if (path && strncmp(path, "/dev/dri/", 9) == 0)
+        return DRM_VIRTUAL_FD;
     return wrap_real_open(path, flags, mode);
 }
 
@@ -419,11 +415,13 @@ static void install_drm_hooks(void)
 
 __attribute__((constructor))
 static void wayland_mac_load(void) {
-    if (geteuid() != 0) {
-        wmac_log("[wayland-mac] must run as root");
-        abort();
-        return;
-    }
+    /*
+     * Classic engage (igettyd / weston / niri as root) may spawn
+     * framebufferd and inputd. A Doorman login user typing `niri` is a
+     * DRM/KMS client of those helpers. Insert still installs open/ioctl
+     * hooks so libc open("/dev/dri/...") is iland, never a real node.
+     * Never abort() for euid != 0. Never sudo the compositor.
+     */
     wmac_log("[wayland-mac] constructor begin uid=%d", (int)geteuid());
 
     /* Create a real pipe dup'd to DRM_VIRTUAL_FD so select/poll work on
@@ -445,6 +443,12 @@ static void wayland_mac_load(void) {
      * epoll shim.  Future DRM hooks go here too. */
     install_epoll_hooks();
     install_drm_hooks();
+
+    if (geteuid() != 0) {
+        wmac_log("[wayland-mac] client-only insert uid=%d (DRM/KMS hooks; "
+                 "helpers stay with Classic)", (int)geteuid());
+        return;
+    }
 
     /* Classic helper publishes Mach via launchd MachServices. After WS
      * unload, bootstrap_look_up of a legacy register name fails

@@ -2,8 +2,8 @@
 #
 # Builds upstream libwayland-mac.dylib (Dobby hooks + embedded amfiexceptiond /
 # framebufferd / inputd). NOT App-Store-safe: requires SIP fully disabled
-# (`csrutil disable` in Recovery), root for the constructor, and
-# private entitlements on the helper daemons.
+# (`csrutil disable` in Recovery). Classic engage spawns helpers as root.
+# Login-user niri/weston insert the same dylib for iland DRM hooks only.
 #
 # Consumed only by Wawona desktop-host / full-dev macOS packaging. Never built
 # for iOS/iPadOS/tvOS/watchOS/visionOS/Android.
