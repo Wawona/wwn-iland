@@ -195,6 +195,9 @@ static void (*g_glFramebufferTexture2D)(unsigned int, unsigned int,
 static unsigned int (*g_glCheckFramebufferStatus)(unsigned int) = NULL;
 static void (*g_glDeleteTextures)(int, const unsigned int *) = NULL;
 static void (*g_glDeleteFramebuffers)(int, const unsigned int *) = NULL;
+static void (*g_glEnable)(unsigned int) = NULL;
+static void (*g_glDisable)(unsigned int) = NULL;
+static unsigned char (*g_glIsEnabled)(unsigned int) = NULL;
 /* Android CPU-readback fallback (#140): give a client's EGLImage texture real
  * RGBA storage when the AHB native-buffer import is unavailable. */
 static void (*g_glTexImage2D)(unsigned int, int, int, int, int, int,
@@ -425,6 +428,9 @@ static void load_gles2(void)
     g_glDeleteTextures = glDeleteTextures;
     g_glDeleteFramebuffers = glDeleteFramebuffers;
     g_glTexImage2D = glTexImage2D;
+    g_glEnable = glEnable;
+    g_glDisable = glDisable;
+    g_glIsEnabled = glIsEnabled;
     if (real_eglGetProcAddress) {
         g_glBlitFramebuffer = (void (*)(int, int, int, int, int, int, int, int,
                                         unsigned int, unsigned int))
@@ -627,6 +633,9 @@ static void load_gles2(void)
     g_glDeleteTextures     = dlsym(h, "glDeleteTextures");
     g_glDeleteFramebuffers = dlsym(h, "glDeleteFramebuffers");
     g_glTexImage2D         = dlsym(h, "glTexImage2D");
+    g_glEnable             = dlsym(h, "glEnable");
+    g_glDisable            = dlsym(h, "glDisable");
+    g_glIsEnabled          = dlsym(h, "glIsEnabled");
     if (real_eglGetProcAddress) {
         g_eglCreateSync = (void *)real_eglGetProcAddress("eglCreateSync");
         if (!g_eglCreateSync)
@@ -1096,12 +1105,9 @@ static EGLSurface zc_pbuffer_for_iosurface(EGLShimDisplay *sd,
         EGL_NONE
     };
 
-    /* GL renders bottom-up into these, so the IOSurface is upside down relative
-     * to how anything downstream samples it. EGL_ANGLE_surface_orientation
-     * would let ANGLE invert while rendering, but the Metal backend rejects it
-     * on IOSurface pbuffers, so the flip is handled where the buffer is
-     * consumed: the KMS presenter's blit shader, and — for Wayland — the
-     * dmabuf Y_INVERT flag the winsys sets on the wl_buffer. */
+    /* GL's default framebuffer is bottom-up. Wayland-EGL flips dest Y in
+     * zc_blit_to_slot so the posted IOSurface is top-down. GBM/KMS keeps
+     * identity blit and lets the Metal presenter flip. */
     EGLSurface s = real_eglCreatePbufferFromClientBuffer(
         sd->angle_display, EGL_IOSURFACE_ANGLE,
         (EGLClientBuffer)io, ss->config, attribs);
@@ -1506,6 +1512,8 @@ void glEGLImageTargetTexture2DOES(unsigned int target, void *image)
 #define WWN_GL_NEAREST                   0x2600
 #define WWN_GL_COLOR_ATTACHMENT0         0x8CE0
 #define WWN_GL_FRAMEBUFFER_COMPLETE      0x8CD5
+#define WWN_GL_SCISSOR_TEST              0x0C11
+#define WWN_GL_BLEND                     0x0BE2
 
 #if defined(__ANDROID__)
 /* Called from the DRM page-flip path (drm_linux.c) just before the buffer is
@@ -1751,10 +1759,44 @@ static void zc_blit_to_slot(EGLShimDisplay *sd, EGLShimSurface *ss,
         }
     }
 
-    g_glBlitFramebuffer(0, 0, (int)ss->width, (int)ss->height,
-                        0, 0, (int)ss->width, (int)ss->height,
-                        WWN_GL_COLOR_BUFFER_BIT, WWN_GL_NEAREST);
+    /* Smithay (niri) and weston leave SCISSOR_TEST/BLEND on. ANGLE then
+     * returns GL_INVALID_OPERATION (0x0502) on this blit. Drain a leftover
+     * client error so we do not mis-attribute it. */
+    if (g_glGetError)
+        (void)g_glGetError();
+    unsigned char scissor_on = 0;
+    unsigned char blend_on = 0;
+    if (g_glIsEnabled) {
+        scissor_on = g_glIsEnabled(WWN_GL_SCISSOR_TEST);
+        blend_on = g_glIsEnabled(WWN_GL_BLEND);
+    }
+    if (g_glDisable) {
+        if (scissor_on)
+            g_glDisable(WWN_GL_SCISSOR_TEST);
+        if (blend_on)
+            g_glDisable(WWN_GL_BLEND);
+    }
+
+    /* Wayland buffers are top-down. Swap dest Y so the posted IOSurface is
+     * already compositor-native; do not mark WWNBottomUp and Y-flip again in
+     * CoreAnimation (that fights geometryFlipped and looks like inverted X+Y).
+     * GBM/KMS keeps an identity blit: the Metal presenter already Y-flips. */
+    if (ss->wayland)
+        g_glBlitFramebuffer(0, 0, (int)ss->width, (int)ss->height,
+                            0, (int)ss->height, (int)ss->width, 0,
+                            WWN_GL_COLOR_BUFFER_BIT, WWN_GL_NEAREST);
+    else
+        g_glBlitFramebuffer(0, 0, (int)ss->width, (int)ss->height,
+                            0, 0, (int)ss->width, (int)ss->height,
+                            WWN_GL_COLOR_BUFFER_BIT, WWN_GL_NEAREST);
     zc_report_gl_error("blit into the presented IOSurface");
+
+    if (g_glEnable) {
+        if (scissor_on)
+            g_glEnable(WWN_GL_SCISSOR_TEST);
+        if (blend_on)
+            g_glEnable(WWN_GL_BLEND);
+    }
 
     /* Detach before release so the texture does not outlive the binding. */
     g_glFramebufferTexture2D(WWN_GL_DRAW_FRAMEBUFFER, WWN_GL_COLOR_ATTACHMENT0,

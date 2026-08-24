@@ -43,10 +43,10 @@ extern "C" {
  * dispatches (or steals) the client's own events. NULL when the compositor
  * does not offer dmabuf, which is the caller's cue to fail surface creation
  * rather than silently render nowhere. */
-/* Swapchain orientation. ANGLE's Metal backend writes bottom-up into the
- * IOSurface, so the EGL winsys needs BOTTOM_UP (Y_INVERT + WWNBottomUp). Vulkan
- * staging blits are top-down — use TOP_DOWN there or the cube renders upside
- * down with "broken depth" optics. */
+/* Swapchain orientation. Wayland clients (GLES blit dest-Y flip, GLES
+ * glReadPixels row reverse, Vulkan staging) write top-down; use TOP_DOWN so
+ * the compositor does not Y-flip again. BOTTOM_UP is only for a producer that
+ * really stores GL's bottom-up rows and cannot flip itself. */
 #define ILAND_WL_SWAPCHAIN_TOP_DOWN   0
 #define ILAND_WL_SWAPCHAIN_BOTTOM_UP  1
 
