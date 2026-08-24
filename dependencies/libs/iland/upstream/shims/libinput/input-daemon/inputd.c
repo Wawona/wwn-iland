@@ -340,13 +340,139 @@ static const uint16_t hid_to_evdev[MAX_HID_USAGE] = {
     [0xE6] = KEY_RIGHTALT,    [0xE7] = KEY_RIGHTMETA,
 };
 
+/* Apple Keyboard Fn. HID 0x07/0x03 is ErrorUndefined on USB; Apple uses it
+ * for Fn. AppleVendorKeyboard 0xFF01/0x03 and TopCase 0x00FF/0x03 too. */
+#define HID_PAGE_KEYBOARD          0x07
+#define HID_PAGE_GENERIC_DESKTOP   0x01
+#define HID_PAGE_CONSUMER          0x0C
+#define HID_PAGE_BUTTON            0x09
+#define HID_PAGE_APPLE_TOPCASE     0x00FF
+#define HID_PAGE_APPLE_VENDOR_KB   0xFF01
+#define HID_USAGE_APPLE_FN         0x03
+
+static int hid_usage_is_fn(uint32_t usage_page, uint32_t usage)
+{
+    if (usage != HID_USAGE_APPLE_FN)
+        return 0;
+    return usage_page == HID_PAGE_KEYBOARD ||
+           usage_page == HID_PAGE_APPLE_VENDOR_KB ||
+           usage_page == HID_PAGE_APPLE_TOPCASE;
+}
+
 static int hid_usage_to_evdev(uint32_t usage_page, uint32_t usage)
 {
-    if (usage_page == 0x07 && usage < MAX_HID_USAGE)
+    usage_page &= 0xFFFF;
+    usage &= 0xFFFF;
+
+    if (hid_usage_is_fn(usage_page, usage))
+        return 0;
+
+    if (usage_page == HID_PAGE_KEYBOARD && usage < MAX_HID_USAGE)
         return hid_to_evdev[usage];
-    if (usage_page == 0x09 && usage >= 1 && usage <= 32)
+
+    /* Consumer Control menu arrows. Some Apple keyboards emit these for
+     * cursor keys when WindowServer is not translating the report. */
+    if (usage_page == HID_PAGE_CONSUMER) {
+        switch (usage) {
+        case 0x42: return KEY_UP;
+        case 0x43: return KEY_DOWN;
+        case 0x44: return KEY_LEFT;
+        case 0x45: return KEY_RIGHT;
+        case 0x221: return KEY_SEARCH;
+        default: return 0;
+        }
+    }
+
+    /* Generic Desktop System Menu arrows. */
+    if (usage_page == HID_PAGE_GENERIC_DESKTOP) {
+        switch (usage) {
+        case 0x8E: return KEY_RIGHT;
+        case 0x8F: return KEY_LEFT;
+        case 0x90: return KEY_UP;
+        case 0x91: return KEY_DOWN;
+        default: return 0;
+        }
+    }
+
+    if (usage_page == HID_PAGE_BUTTON && usage >= 1 && usage <= 32)
         return BTN_LEFT + (int)(usage - 1);
     return 0;
+}
+
+static int g_mod_ctrl;
+static int g_mod_alt;
+static int g_mod_fn;
+static void send_key_event(uint64_t time, int key, int pressed);
+
+/* MacBook Fn layer (HIToolbox usually does this; Classic has no WindowServer). */
+static int apply_apple_fn_layer(int evdev)
+{
+    if (!g_mod_fn || evdev <= 0)
+        return evdev;
+    switch (evdev) {
+    case KEY_UP:        return KEY_PAGEUP;
+    case KEY_DOWN:      return KEY_PAGEDOWN;
+    case KEY_LEFT:      return KEY_HOME;
+    case KEY_RIGHT:     return KEY_END;
+    case KEY_BACKSPACE: return KEY_DELETE;
+    default:            return evdev;
+    }
+}
+
+static void handle_hid_keyboard_fields(uint32_t usage_page, uint32_t usage,
+                                       int pressed, uint64_t ts, int trace)
+{
+    usage_page &= 0xFFFF;
+    usage &= 0xFFFF;
+
+    if (hid_usage_is_fn(usage_page, usage)) {
+        g_mod_fn = pressed ? 1 : 0;
+        if (trace)
+            fprintf(stderr, "[inputd]   Fn %s\n", pressed ? "down" : "up");
+        return;
+    }
+
+    int evdev = hid_usage_to_evdev(usage_page, usage);
+    evdev = apply_apple_fn_layer(evdev);
+    if (evdev > 0) {
+        if (trace)
+            fprintf(stderr,
+                    "[inputd]   Keyboard: page=0x%x usage=0x%x evdev=%d pressed=%d fn=%d\n",
+                    usage_page, usage, evdev, pressed, g_mod_fn);
+        send_key_event(ts, evdev, pressed);
+    } else if (trace && usage_page != 0 && usage != 0) {
+        fprintf(stderr, "[inputd]   unmapped keyboard page=0x%x usage=0x%x\n",
+                usage_page, usage);
+    }
+}
+
+static void handle_hid_keyboard_event(IOHIDEventRef event, uint64_t ts, int trace)
+{
+    int32_t usagePage = IOHIDEventGetIntegerValue(event, kIOHIDEventFieldKeyboardUsagePage);
+    int32_t usage     = IOHIDEventGetIntegerValue(event, kIOHIDEventFieldKeyboardUsage);
+    int32_t down      = IOHIDEventGetIntegerValue(event, kIOHIDEventFieldKeyboardDown);
+    handle_hid_keyboard_fields((uint32_t)usagePage, (uint32_t)usage,
+                               down != 0 ? 1 : 0, ts, trace);
+
+    /* Apple often wraps cursor keys as VendorDefined parents that ConformsTo
+     * keyboard with usage=0. The real usage is on a Keyboard child. */
+    CFArrayRef children = IOHIDEventGetChildren(event);
+    if (!children)
+        return;
+    CFIndex count = CFArrayGetCount(children);
+    for (CFIndex i = 0; i < count; i++) {
+        IOHIDEventRef child = (IOHIDEventRef)CFArrayGetValueAtIndex(children, i);
+        if (!child || !IOHIDEventConformsTo(child, kIOHIDEventTypeKeyboard))
+            continue;
+        int32_t cpage = IOHIDEventGetIntegerValue(child, kIOHIDEventFieldKeyboardUsagePage);
+        int32_t cusage = IOHIDEventGetIntegerValue(child, kIOHIDEventFieldKeyboardUsage);
+        int32_t cdown = IOHIDEventGetIntegerValue(child, kIOHIDEventFieldKeyboardDown);
+        if ((uint32_t)cpage == (uint32_t)usagePage &&
+            (uint32_t)cusage == (uint32_t)usage)
+            continue;
+        handle_hid_keyboard_fields((uint32_t)cpage, (uint32_t)cusage,
+                                   cdown != 0 ? 1 : 0, ts, trace);
+    }
 }
 
 static uint64_t now_usec(void)
@@ -409,9 +535,8 @@ static void send_device_removed(int id)
  *   Ctrl+Alt+F1..F6  -> /tmp/libwayland-support/modeb-vt  (1..6)
  *   Ctrl+Alt+F7      -> modeb-vt = 7 (graphics)
  *   Ctrl+Alt+Backspace -> modeb-restore-aqua + SIGTERM Mode B client
+ *   Fn+Ctrl+Alt+Backspace (MacBook: Fn remaps Delete) also restores Aqua
  */
-static int g_mod_ctrl;
-static int g_mod_alt;
 
 static void modeb_write_vt(int vt)
 {
@@ -433,7 +558,7 @@ static void modeb_request_restore_aqua(void)
     const char *pidfile = "/tmp/libwayland-support/modeb-compositor.pid";
     int fd = open(stamp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) {
-        const char *msg = "ctrl-alt-backspace\n";
+        const char *msg = "ctrl-alt-backspace\n"; /* also Fn+chord / Delete */
         (void)write(fd, msg, strlen(msg));
         close(fd);
     }
@@ -465,7 +590,8 @@ static int modeb_chord_filter(int evdev_key, int pressed)
     if (!pressed || !g_mod_ctrl || !g_mod_alt)
         return 0;
 
-    if (evdev_key == KEY_BACKSPACE) {
+    /* MacBook Fn+Backspace is HID Delete. Treat both as the Aqua chord. */
+    if (evdev_key == KEY_BACKSPACE || evdev_key == KEY_DELETE) {
         modeb_request_restore_aqua();
         return 1;
     }
@@ -633,17 +759,7 @@ static void iohid_event_callback(void *target, void *sender,
 
     /* Keyboard — check conforms first (covers VendorDefined wrapping keyboard) */
     if (conforms_kb) {
-        int32_t usagePage = IOHIDEventGetIntegerValue(event, kIOHIDEventFieldKeyboardUsagePage);
-        int32_t usage     = IOHIDEventGetIntegerValue(event, kIOHIDEventFieldKeyboardUsage);
-        int32_t down      = IOHIDEventGetIntegerValue(event, kIOHIDEventFieldKeyboardDown);
-        int pressed = (down != 0) ? 1 : 0;
-        int evdev = hid_usage_to_evdev((uint32_t)usagePage, (uint32_t)usage);
-        if (evdev > 0) {
-        if (trace)
-            fprintf(stderr, "[inputd]   Keyboard: page=0x%x usage=0x%x evdev=%d down=%d pressed=%d\n",
-                    usagePage, usage, evdev, (int)down, pressed);
-            send_key_event(ts, evdev, pressed);
-        }
+        handle_hid_keyboard_event(event, ts, trace);
         return;
     }
 
