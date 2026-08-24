@@ -43,10 +43,9 @@ extern "C" {
  * dispatches (or steals) the client's own events. NULL when the compositor
  * does not offer dmabuf, which is the caller's cue to fail surface creation
  * rather than silently render nowhere. */
-/* Swapchain orientation. Wayland clients (GLES row reverse after blit, GLES
- * glReadPixels row reverse, Vulkan staging) write top-down; use TOP_DOWN so
- * the compositor does not Y-flip again. BOTTOM_UP is only for a producer that
- * really stores GL's bottom-up rows and cannot flip itself. */
+/* Swapchain orientation. Vulkan staging writes top-down. GLES Wayland-EGL
+ * stores GL's bottom-up rows; use BOTTOM_UP so Wawona bakes a flipped
+ * CGImage. Do not CALayer Y-scale under geometryFlipped. */
 #define ILAND_WL_SWAPCHAIN_TOP_DOWN   0
 #define ILAND_WL_SWAPCHAIN_BOTTOM_UP  1
 

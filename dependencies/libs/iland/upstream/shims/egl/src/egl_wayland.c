@@ -302,12 +302,11 @@ IlandWlSwapchain *iland_wl_swapchain_create(IlandWlWinsys *ws,
     if (w <= 0 || h <= 0)
         return NULL;
 
-    /* GLES swap writes top-down (row reverse after GPU flush, or
-     * glReadPixels + row reverse). Same orientation as Vulkan staging.
-     * BOTTOM_UP plus a CALayer Y-flip on Wawona's geometryFlipped
-     * contentLayer inverts both axes. */
+    /* GLES writes GL bottom-up rows. Mark BOTTOM_UP so Wawona bakes a
+     * flipped CGImage. Do not CALayer Y-scale under geometryFlipped (that
+     * inverts X+Y). Vulkan staging stays TOP_DOWN. */
     IlandWlSwapchain *sc = iland_wl_swapchain_create_for_surface(
-        ws, surface, (uint32_t)w, (uint32_t)h, ILAND_WL_SWAPCHAIN_TOP_DOWN);
+        ws, surface, (uint32_t)w, (uint32_t)h, ILAND_WL_SWAPCHAIN_BOTTOM_UP);
     if (!sc)
         return NULL;
     sc->win = win;

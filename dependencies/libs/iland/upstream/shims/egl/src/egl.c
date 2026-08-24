@@ -1684,40 +1684,6 @@ static void zc_probe_iosurface(IOSurfaceRef io, const char *what)
     IOSurfaceUnlock(io, kIOSurfaceLockReadOnly, NULL);
 }
 
-#if defined(__APPLE__) && defined(ILAND_HAVE_WL_WINSYS)
-/* CALayer.contents is top-down. The identity blit leaves GL's bottom-up rows
- * in the IOSurface (same layout the Metal presenter Y-flips). Reverse rows
- * after eglReleaseTexImage + GPU flush so we do not mark WWNBottomUp. */
-static void zc_wayland_make_top_down(IOSurfaceRef io)
-{
-    if (!io)
-        return;
-    if (IOSurfaceLock(io, 0, NULL) != 0)
-        return;
-    uint8_t *base = (uint8_t *)IOSurfaceGetBaseAddress(io);
-    size_t h = IOSurfaceGetHeight(io);
-    size_t stride = IOSurfaceGetBytesPerRow(io);
-    if (!base || h < 2 || stride == 0) {
-        IOSurfaceUnlock(io, 0, NULL);
-        return;
-    }
-    uint8_t *tmp = (uint8_t *)malloc(stride);
-    if (!tmp) {
-        IOSurfaceUnlock(io, 0, NULL);
-        return;
-    }
-    for (size_t y = 0; y < h / 2; y++) {
-        uint8_t *top = base + y * stride;
-        uint8_t *bot = base + (h - 1 - y) * stride;
-        memcpy(tmp, top, stride);
-        memcpy(top, bot, stride);
-        memcpy(bot, tmp, stride);
-    }
-    free(tmp);
-    IOSurfaceUnlock(io, 0, NULL);
-}
-#endif
-
 static void zc_report_gl_error(const char *what)
 {
     if (!g_glGetError) return;
@@ -1812,9 +1778,9 @@ static void zc_blit_to_slot(EGLShimDisplay *sd, EGLShimSurface *ss,
     }
 
     /* Identity blit. GBM/KMS: the Metal presenter Y-flips in its shader.
-     * Wayland: ANGLE's dest-Y invert does not change IOSurface byte order, so
-     * zc_wayland_make_top_down() reflects rows after the GPU flush. A CALayer
-     * Y-scale under geometryFlipped looks like inverted X+Y; do not do that. */
+     * Wayland GLES: keep GL's bottom-up rows and mark WWNBottomUp. Wawona
+     * bakes a flipped CGImage; a CALayer Y-scale under geometryFlipped looks
+     * like inverted X+Y. */
     g_glBlitFramebuffer(0, 0, (int)ss->width, (int)ss->height,
                         0, 0, (int)ss->width, (int)ss->height,
                         WWN_GL_COLOR_BUFFER_BIT, WWN_GL_NEAREST);
@@ -2147,10 +2113,6 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
                                 ss->iosurf_pbuffers[ss->wl_slot]);
 
             zc_flush_gpu(sd->angle_display);
-#if defined(__APPLE__)
-            zc_wayland_make_top_down(iland_wl_swapchain_iosurface(
-                ss->wl_swapchain, ss->wl_slot));
-#endif
 
             zc_probe_iosurface(iland_wl_swapchain_iosurface(ss->wl_swapchain,
                                                             ss->wl_slot),
@@ -2199,8 +2161,10 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
         size_t dst_pitch_bytes = IOSurfaceGetBytesPerRow(iosurf);
         const uint8_t *src8 = (const uint8_t *)g_pixels;
         if (dst8 && dst_pitch_bytes > 0) {
+            /* glReadPixels is bottom-up. Leave it; WWNBottomUp + compositor
+             * CGImage flip matches the zerocopy blit. */
             for (uint32_t y = 0; y < h; y++) {
-                const uint8_t *s = src8 + (size_t)(h - 1 - y) * w * 4;
+                const uint8_t *s = src8 + (size_t)y * w * 4;
                 uint8_t *d = dst8 + (size_t)y * dst_pitch_bytes;
                 memcpy(d, s, (size_t)w * 4);
             }
