@@ -13,7 +13,7 @@ let
     if isTVOS then "tvos" else if isVisionOS then "visionos" else "ios";
   slice =
     if isTVOS then
-      if simulator then "tvos-arm64_x86_64-simulator" else "tvos-arm64"
+      if simulator then "tvos-arm64_x86_64-simulator" else "tvos-arm64_arm64e"
     else if isVisionOS then
       if simulator then "xros-arm64_x86_64-simulator" else "xros-arm64"
     else if simulator then
