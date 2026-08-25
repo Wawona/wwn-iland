@@ -54,11 +54,8 @@
 #include "iland_wl_ops.h"
 
 /* NULL unless libiland_wayland_egl.a is linked, which is what makes this a
- * Wayland-capable build; see iland_wl_ops.h. Calling the winsys by name would
- * put an undefined symbol in every KMS-only client, so the names below are
- * redirected through the table and the entry points check iland_wl_ops first. */
-const IlandWlOps *iland_wl_ops = NULL;
-
+ * Wayland-capable build; see iland_wl_ops.h. The pointer itself lives in
+ * iland_wl_ops.c so cores that skip egl.c (tvOS Phase 1) still export it. */
 #define iland_wl_winsys_destroy(...)       iland_wl_ops->winsys_destroy(__VA_ARGS__)
 #define iland_wl_swapchain_create(...)     iland_wl_ops->swapchain_create(__VA_ARGS__)
 #define iland_wl_swapchain_destroy(...)    iland_wl_ops->swapchain_destroy(__VA_ARGS__)

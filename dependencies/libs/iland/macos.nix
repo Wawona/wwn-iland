@@ -111,6 +111,7 @@ pkgs.stdenv.mkDerivation {
       shims/drm/drm/src/drm.c \
       shims/drm/drm/src/drm_linux.c \
       shims/drm/drm/src/drm_ioctl.c \
+      shims/egl/src/iland_wl_ops.c \
       shims/egl/src/egl.c; do
       obj="$(basename "$src").o"
       echo "CC $src"

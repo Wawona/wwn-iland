@@ -47,7 +47,7 @@ typedef struct IlandWlOps {
 extern "C" {
 #endif
 
-/* Defined in shims/egl/src/egl.c (core), set by shims/egl/src/egl_wayland.c. */
+/* Defined in shims/egl/src/iland_wl_ops.c (core), set by shims/egl/src/egl_wayland.c. */
 extern const IlandWlOps *iland_wl_ops;
 
 #ifdef __cplusplus

@@ -156,6 +156,7 @@ EOF
       shims/drm/drm/src/drm_linux.c
       shims/drm/drm/src/drm_ioctl.c
       shims/drm/drm/src/drm_ios_ipc_stubs.c
+      shims/egl/src/iland_wl_ops.c
     "
     ${lib.optionalString enableGl ''CORE_SRCS="$CORE_SRCS shims/egl/src/egl.c"''}
     for src in $CORE_SRCS; do
