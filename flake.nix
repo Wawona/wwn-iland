@@ -74,7 +74,9 @@
           android = ./dependencies/libs/angle/android.nix;
           ios = ./dependencies/libs/angle/ios.nix;
           ipados = ./dependencies/libs/angle/ios.nix;
-          tvos = null;
+          # Source GN (same ios.nix as visionOS). Chromium already has
+          # target_platform=tvos. Cited: Wawona/docs/wwn-repo-dag.md.
+          tvos = ./dependencies/libs/angle/ios.nix;
           visionos = ./dependencies/libs/angle/ios.nix;
           watchos = null;
           macos = ./dependencies/libs/angle/macos.nix;
@@ -151,6 +153,8 @@
           angle-ios-sim = tc.buildForIOS "angle" { simulator = true; };
           angle-visionos = tc.buildForVisionOS "angle" { };
           angle-visionos-sim = tc.buildForVisionOS "angle" { simulator = true; };
+          angle-tvos = tc.buildForTVOS "angle" { };
+          angle-tvos-sim = tc.buildForTVOS "angle" { simulator = true; };
           moltenvk-ios = tc.buildForIOS "moltenvk" { };
           moltenvk-ios-sim = tc.buildForIOS "moltenvk" { simulator = true; };
           moltenvk-visionos = tc.buildForVisionOS "moltenvk" { };

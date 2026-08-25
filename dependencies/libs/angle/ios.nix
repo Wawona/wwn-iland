@@ -15,17 +15,28 @@
 
 let
   isVisionOS = iosToolchain.isVisionOSToolchain or false;
+  isTVOS = iosToolchain.isTVOSToolchain or false;
+  # XCSoar prebuilts are iOS XCFrameworks only. visionOS and tvOS GN from
+  # source (Chromium already has target_platform=tvos; xros is our patch).
+  # See Wawona/docs/wwn-repo-dag.md: angle stays L1.
+  needsSourceBuild = isVisionOS || isTVOS;
   xrosPatch = ./patches/0001-chromium-build-add-xros-target.patch;
   xrosPatchHash = builtins.hashFile "sha256" xrosPatch;
   sdkPlatform =
     if isVisionOS then
       if simulator then "XRSimulator" else "XROS"
+    else if isTVOS then
+      if simulator then "AppleTVSimulator" else "AppleTVOS"
     else if simulator then "iPhoneSimulator" else "iPhoneOS";
   minFlag =
     if isVisionOS then
       # xrOS deployment is encoded in the clang target triple; unlike iOS,
       # Apple clang has no -mvisionos[-simulator]-version-min spelling.
       ""
+    else if isTVOS && simulator then
+      "-mtvos-simulator-version-min=${iosToolchain.deploymentTarget}"
+    else if isTVOS then
+      "-mtvos-version-min=${iosToolchain.deploymentTarget}"
     else if simulator then
       "-mios-simulator-version-min=${iosToolchain.deploymentTarget}"
     else
@@ -33,9 +44,17 @@ let
   packageSuffix =
     if isVisionOS then
       if simulator then "visionos-simulator" else "visionos"
+    else if isTVOS then
+      if simulator then "tvos-simulator" else "tvos"
     else if simulator then "ios-simulator" else "ios";
+  gnTargetPlatform =
+    if isVisionOS then
+      if simulator then "xrsimulator" else "xros"
+    else if isTVOS then
+      if simulator then "appletvsimulator" else "appletvos"
+    else if simulator then "iphonesimulator" else "iphoneos";
 in
-if usePrebuilt && !isVisionOS && simulator then
+if usePrebuilt && !needsSourceBuild && simulator then
   let
     sources = import ./prebuilt-sources.nix { inherit lib pkgs; };
     deviceHeaders = pkgs.fetchurl {
@@ -74,7 +93,7 @@ if usePrebuilt && !isVisionOS && simulator then
       platforms = platforms.darwin;
     };
   }
-else if usePrebuilt && !isVisionOS && !simulator then
+else if usePrebuilt && !needsSourceBuild && !simulator then
   let
     sources = import ./prebuilt-sources.nix { inherit lib pkgs; };
     deviceHeaders = pkgs.fetchurl {
@@ -117,7 +136,7 @@ else
   import ./cross-base.nix {
     inherit lib pkgs buildPackages;
     pname = "angle-${packageSuffix}";
-    clangBasePath = if isVisionOS then "xcode-clang" else null;
+    clangBasePath = if needsSourceBuild then "xcode-clang" else null;
     buildTargets = "angle_common libEGL_static libGLESv2_static";
     patchesExtra = lib.optionals isVisionOS [
       xrosPatch
@@ -128,6 +147,11 @@ else
       "target_environment=\"${if simulator then "simulator" else "device"}\""
     ] ++ lib.optionals isVisionOS [
       "target_platform=\"xros\""
+    ] ++ lib.optionals isTVOS [
+      "target_platform=\"tvos\""
+      # Chromium mobile_config.gni asserts this for tvOS. ANGLE does not
+      # build Blink; the flag only satisfies the GN gate.
+      "use_blink=true"
     ] ++ [
       "angle_enable_metal=true"
       "angle_enable_vulkan=false"
@@ -158,7 +182,7 @@ else
       export CFLAGS="-arch arm64 -isysroot $SDKROOT ${minFlag}"
       export CXXFLAGS="$CFLAGS"
       export LDFLAGS="-arch arm64 -isysroot $SDKROOT ${minFlag}"
-      ${lib.optionalString isVisionOS ''
+      ${lib.optionalString needsSourceBuild ''
         rm -rf .angle-xcode-clang
         mkdir -p .angle-xcode-clang/bin
         ln -s "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang" \
@@ -246,7 +270,7 @@ else
         "nixpkgsAngleVersion": "${pkgs.angle.version}",
         "chromiumBuildRevision": "169fcf699b64d2d5e75a391beaec8a7ad6e41a7f",
         "sdkPlatform": "${sdkPlatform}",
-        "targetPlatform": "${if isVisionOS then (if simulator then "xrsimulator" else "xros") else (if simulator then "iphonesimulator" else "iphoneos")}",
+        "targetPlatform": "${gnTargetPlatform}",
         "targetEnvironment": "${if simulator then "simulator" else "device"}",
         "targetCpu": "arm64",
         "deploymentTarget": "${iosToolchain.deploymentTarget}",

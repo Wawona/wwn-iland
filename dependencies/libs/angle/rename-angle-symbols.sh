@@ -49,6 +49,8 @@ SYMS=(
   eglDestroyContext eglCreateWindowSurface eglDestroySurface eglMakeCurrent
   eglSwapBuffers eglBindAPI eglWaitGL eglSwapInterval eglCreatePbufferSurface
   eglCreatePbufferFromClientBuffer eglGetCurrentContext eglGetProcAddress
+  eglQueryContext eglQuerySurface eglReleaseThread
+  eglQueryDmaBufFormatsEXT eglQueryDmaBufModifiersEXT
   eglCreatePlatformWindowSurface eglCreatePlatformWindowSurfaceEXT
   eglGetPlatformDisplay eglGetPlatformDisplayEXT
   eglCreateImageKHR eglDestroyImageKHR

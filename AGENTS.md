@@ -24,8 +24,9 @@ vanilla CoreBedtime behavior.
   `inputd` / `amfiexceptiond`. Needs SIP fully disabled (`csrutil disable`) +
   root. **Not** App Store.
 - Never add `iland-baremetal` variants for iOS/iPadOS/tvOS/watchOS/visionOS/Android.
-- tvOS Mode A is real userland (Vulkan / MoltenVK first, no ANGLE until Phase 2).
-  watchOS Mode A stays an empty stub (no Metal in the SDK). See workspace
+- tvOS Mode A is real userland: MoltenVK (Vulkan to Metal) and ANGLE
+  (OpenGL ES to Metal), both source/static like visionOS. watchOS Mode A
+  stays an empty stub (no Metal in the SDK). See workspace
   rule `wwn-iland-apple-fallback`.
 
 Canonical prose (integration side):

@@ -55,7 +55,7 @@
 
 /* NULL unless libiland_wayland_egl.a is linked, which is what makes this a
  * Wayland-capable build; see iland_wl_ops.h. The pointer itself lives in
- * iland_wl_ops.c so cores that skip egl.c (tvOS Phase 1) still export it. */
+ * iland_wl_ops.c so cores that skip egl.c still export it. */
 #define iland_wl_winsys_destroy(...)       iland_wl_ops->winsys_destroy(__VA_ARGS__)
 #define iland_wl_swapchain_create(...)     iland_wl_ops->swapchain_create(__VA_ARGS__)
 #define iland_wl_swapchain_destroy(...)    iland_wl_ops->swapchain_destroy(__VA_ARGS__)

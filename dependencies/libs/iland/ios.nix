@@ -2,8 +2,8 @@
 #
 # Builds the IOSurface-backed Linux-graphics compat shims as a static archive
 # (libiland_userland.a). GLES/EGL links ANGLE when enableGl is true
-# (ILAND_ANGLE_STATIC, no dlopen). tvOS Phase 1 sets enableGl=false (Vulkan
-# first; no Chromium GN tvOS ANGLE target yet).
+# (ILAND_ANGLE_STATIC, no dlopen). tvOS uses the same recipe with ANGLE
+# from source GN (target_platform=tvos). watchOS stays enableGl=false.
 {
   lib,
   pkgs,

@@ -1,4 +1,5 @@
-# tvOS Mode A userland. Vulkan first: IOSurface + Metal present and
-# Wayland-Vulkan WSI. No ANGLE until Phase 2 (Chromium GN tvOS target).
+# tvOS Mode A userland. IOSurface + Metal present, Wayland-Vulkan WSI
+# (MoltenVK), and ANGLE GLES (source GN, same ios.nix as visionOS).
 # watchOS stays the empty stub (no Metal in the SDK).
-args: import ./ios.nix (args // { enableGl = false; })
+# Cited: Wawona/docs/wwn-repo-dag.md (angle is L1).
+args: import ./ios.nix args
