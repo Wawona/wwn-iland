@@ -92,7 +92,7 @@
           ipados = ./dependencies/libs/moltenvk/apple-mobile.nix;
           visionos = ./dependencies/libs/moltenvk/apple-mobile.nix;
           macos = ./dependencies/libs/moltenvk/macos.nix;
-          tvos = null;
+          tvos = ./dependencies/libs/moltenvk/apple-mobile.nix;
           watchos = null;
           android = null;
         };
@@ -141,6 +141,7 @@
           iland-ios-sim = tc.buildForIOS "iland" { simulator = true; };
           iland-ipados = tc.buildForIPadOS "iland" { };
           iland-tvos = tc.buildForTVOS "iland" { };
+          iland-tvos-sim = tc.buildForTVOS "iland" { simulator = true; };
           iland-watchos = tc.buildForWatchOS "iland" { };
           iland-visionos = tc.buildForVisionOS "iland" { };
           iland-visionos-sim = tc.buildForVisionOS "iland" { simulator = true; };
@@ -154,6 +155,8 @@
           moltenvk-ios-sim = tc.buildForIOS "moltenvk" { simulator = true; };
           moltenvk-visionos = tc.buildForVisionOS "moltenvk" { };
           moltenvk-visionos-sim = tc.buildForVisionOS "moltenvk" { simulator = true; };
+          moltenvk-tvos = tc.buildForTVOS "moltenvk" { };
+          moltenvk-tvos-sim = tc.buildForTVOS "moltenvk" { simulator = true; };
           moltenvk-macos = tc.buildForMacOS "moltenvk" { };
           kosmickrisp-macos = tc.buildForMacOS "kosmickrisp" { };
           swiftshader-macos = tc.buildForMacOS "swiftshader" { };

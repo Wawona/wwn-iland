@@ -8,8 +8,13 @@
 
 let
   isVisionOS = iosToolchain.isVisionOSToolchain or false;
+  isTVOS = iosToolchain.isTVOSToolchain or false;
+  platformName =
+    if isTVOS then "tvos" else if isVisionOS then "visionos" else "ios";
   slice =
-    if isVisionOS then
+    if isTVOS then
+      if simulator then "tvos-arm64_x86_64-simulator" else "tvos-arm64"
+    else if isVisionOS then
       if simulator then "xros-arm64_x86_64-simulator" else "xros-arm64"
     else if simulator then
       "ios-arm64_x86_64-simulator"
@@ -17,7 +22,7 @@ let
       "ios-arm64";
 in
 pkgs.stdenv.mkDerivation {
-  pname = "moltenvk-${if isVisionOS then "visionos" else "ios"}${lib.optionalString simulator "-sim"}";
+  pname = "moltenvk-${platformName}${lib.optionalString simulator "-sim"}";
   version = "1.4.1";
 
   src = pkgs.fetchurl {
@@ -38,7 +43,11 @@ pkgs.stdenv.mkDerivation {
     runHook preInstall
     root="MoltenVK/MoltenVK"
     archive="$root/static/MoltenVK.xcframework/${slice}/libMoltenVK.a"
-    test -f "$archive"
+    if [ ! -f "$archive" ]; then
+      echo "missing $archive; xcframework slices:" >&2
+      ls -1 "$root/static/MoltenVK.xcframework" >&2 || true
+      exit 1
+    fi
     mkdir -p "$out/lib" "$out/include" "$out/nix-support"
     install -m644 "$archive" "$out/lib/libMoltenVK.a"
     cp -R "$root/include/." "$out/include/"

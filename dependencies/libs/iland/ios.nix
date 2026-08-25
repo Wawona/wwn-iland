@@ -1,15 +1,16 @@
 # iland userland core for iOS (Mode A — in-window, App-Store-safe shape).
 #
-# Builds the IOSurface/ANGLE-backed Linux-graphics compat shims as a single
-# static archive (libiland_userland.a) for nested GL clients (kmscube,
-# weston-simple-egl). EGL calls link directly against ANGLE static libs
-# (ILAND_ANGLE_STATIC — no dlopen).
+# Builds the IOSurface-backed Linux-graphics compat shims as a static archive
+# (libiland_userland.a). GLES/EGL links ANGLE when enableGl is true
+# (ILAND_ANGLE_STATIC, no dlopen). tvOS Phase 1 sets enableGl=false (Vulkan
+# first; no Chromium GN tvOS ANGLE target yet).
 {
   lib,
   pkgs,
   stdenv,
   buildModule,
   simulator ? false,
+  enableGl ? true,
   iosToolchain ? (import ../../apple/default.nix { inherit lib pkgs; }),
   # Injected by wwn-toolchain (xcodeUtils === the apple toolchain). Previously
   # imported via ../../utils/xcode-wrapper.nix; falls back to iosToolchain.
@@ -18,25 +19,43 @@
 }:
 
 let
-  angle = buildModule.buildForIOS "angle" { inherit simulator; };
+  angle =
+    if enableGl then
+      buildModule.buildForIOS "angle" { inherit simulator; }
+    else
+      null;
   # Wayland-EGL winsys (same IOSurface-as-dmabuf path as macOS): libwayland-client
   # for the protocol calls, scanner + XML for the linux-dmabuf client bindings.
+  # Vulkan WSI uses this winsys without ANGLE (egl_wayland.c has no EGL includes).
   libwayland = buildModule.buildForIOS "libwayland" { inherit simulator; };
   waylandScanner = pkgs.wayland-scanner;
   waylandProtocols = pkgs.wayland-protocols;
   angleLinkKind =
-    if builtins.pathExists "${angle}/nix-support/link-kind" then
+    if angle == null then
+      "none"
+    else if builtins.pathExists "${angle}/nix-support/link-kind" then
       lib.strings.trim (builtins.readFile "${angle}/nix-support/link-kind")
     else
       "static";
   angleStaticFlag = if angleLinkKind == "static" then "-DILAND_ANGLE_STATIC" else "";
-  # buildForVisionOS sets isVisionOSToolchain + xros/xrsimulator SDK; do not
-  # hardcode iPhoneSimulator or ld rejects libiland_userland.a (platform 7 vs 12).
+  angleIncludes =
+    if angle == null then
+      ""
+    else
+      "-I${angle}/include -I${angle}/include/EGL -I${angle}/include/GLES2";
+  # buildForVisionOS / buildForTVOS set toolchain flags; do not hardcode
+  # iPhoneSimulator or ld rejects the archive (wrong LC_BUILD_VERSION platform).
   isVisionOS = iosToolchain.isVisionOSToolchain or false;
-  minVersion = iosToolchain.deploymentTarget or (if isVisionOS then "26.0" else "17.0");
+  isTVOS = iosToolchain.isTVOSToolchain or false;
+  minVersion =
+    iosToolchain.deploymentTarget or (
+      if isVisionOS then "26.0" else "17.0"
+    );
   sdkPlatform =
     if isVisionOS then
       if simulator then "XRSimulator" else "XROS"
+    else if isTVOS then
+      if simulator then "AppleTVSimulator" else "AppleTVOS"
     else if simulator then
       "iPhoneSimulator"
     else
@@ -46,6 +65,10 @@ let
       "-target arm64-apple-xros${minVersion}-simulator"
     else if isVisionOS then
       "-target arm64-apple-xros${minVersion}"
+    else if isTVOS && simulator then
+      "-mtvos-simulator-version-min=${minVersion}"
+    else if isTVOS then
+      "-mtvos-version-min=${minVersion}"
     else if simulator then
       "-mios-simulator-version-min=${minVersion}"
     else
@@ -120,9 +143,7 @@ EOF
       -Ishims/wayland-egl/include \
       -I${libwayland}/include \
       -I${libwayland}/include/wayland \
-      -I${angle}/include \
-      -I${angle}/include/EGL \
-      -I${angle}/include/GLES2"
+      ${angleIncludes}"
 
     COMMON_FLAGS="-arch arm64 -isysroot $SDKROOT ${minFlag} -fPIC -O2 -std=c11 \
       ${angleStaticFlag} $INCLUDES -framework IOSurface -framework Foundation \
@@ -135,7 +156,9 @@ EOF
       shims/drm/drm/src/drm_linux.c \
       shims/drm/drm/src/drm_ioctl.c \
       shims/drm/drm/src/drm_ios_ipc_stubs.c \
-      shims/egl/src/egl.c; do
+      ${lib.optionalString enableGl "shims/egl/src/egl.c \\"}
+      ; do
+      [ -n "$src" ] || continue
       obj="$(basename "$src").o"
       echo "CC $src"
       "$CLANG" -c "$src" $COMMON_FLAGS -o "$obj"
@@ -188,14 +211,14 @@ EOF
   '';
 
   installPhase = ''
-    mkdir -p $out/lib/pkgconfig $out/include/EGL $out/include/GLES2 $out/include/GLES3 $out/include/KHR
+    mkdir -p $out/lib/pkgconfig $out/include/EGL $out/include/GLES2 $out/include/GLES3 $out/include/KHR $out/nix-support
 
     cp libiland_userland.a $out/lib/
     cp libiland_wayland_egl.a $out/lib/
     cp libiland_wayland_vulkan.a $out/lib/
 
     cp shims/gbm/include/gbm.h                       $out/include/
-    cp shims/egl/include/egl_shim.h                  $out/include/
+    ${lib.optionalString enableGl "cp shims/egl/include/egl_shim.h $out/include/"}
     # Wayland-EGL winsys. wl_egl_window_* live in this archive, so clients must
     # NOT also link libwayland-egl (that one is an abort-on-call vendor stub).
     cp shims/egl/include/iland_wl_winsys.h           $out/include/
@@ -224,18 +247,25 @@ Libs: -L\''${libdir} -liland_userland
 Cflags: -I\''${includedir}
 EOF
 
+    ${lib.optionalString enableGl ''
     cp -r ${angle}/include/EGL/.   $out/include/EGL/
     cp -r ${angle}/include/GLES2/. $out/include/GLES2/
     cp -r ${angle}/include/GLES3/. $out/include/GLES3/ || true
     cp -r ${angle}/include/KHR/.   $out/include/KHR/
+    echo "${angle}" > $out/nix-support/angle-path
+    ''}
 
     mkdir -p $out/nix-support
-    echo "${angle}" > $out/nix-support/angle-path
     echo "mode-a-userland" > $out/nix-support/iland-mode
+    ${lib.optionalString (!enableGl) ''
+    echo none > $out/nix-support/angle-path
+    echo vulkan-first > $out/nix-support/tvos-gpu-phase
+    ''}
   '';
 
   passthru = {
     inherit angle;
+  } // lib.optionalAttrs (angle != null) {
     angleLibs = "${angle}/lib";
   };
 

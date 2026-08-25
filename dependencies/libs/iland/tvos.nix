@@ -1,16 +1,4 @@
-# tvOS: non-GL / non-IOKit stub (platform-targets matrix).
-# Not pulled when weston enableIlandDrm=false; present so accidental builds
-# never import the iOS ANGLE recipe.
-{ lib, pkgs, ... }:
-
-pkgs.runCommand "iland-userland-tvos-stub-0.1.0" {
-  nativeBuildInputs = [ pkgs.binutils ];
-} ''
-  mkdir -p "$out/lib" "$out/include" "$out/nix-support"
-  # Empty static archive — no ANGLE, no IOKit symbols.
-  ar rcs "$out/lib/libiland_userland.a"
-  echo stub > "$out/nix-support/link-kind"
-  cat > "$out/include/iland_stub.h" <<'EOF'
-/* tvOS iland stub — no GPU userland. */
-EOF
-''
+# tvOS Mode A userland. Vulkan first: IOSurface + Metal present and
+# Wayland-Vulkan WSI. No ANGLE until Phase 2 (Chromium GN tvOS target).
+# watchOS stays the empty stub (no Metal in the SDK).
+args: import ./ios.nix (args // { enableGl = false; })
