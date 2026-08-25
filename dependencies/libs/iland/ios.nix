@@ -150,15 +150,15 @@ EOF
       -framework CoreFoundation -framework CoreGraphics -framework QuartzCore -framework Metal"
 
     OBJS=""
-    for src in \
-      shims/drm/displaysurface/src/DisplaySurface.m \
-      shims/gbm/src/gbm.m \
-      shims/drm/drm/src/drm_linux.c \
-      shims/drm/drm/src/drm_ioctl.c \
-      shims/drm/drm/src/drm_ios_ipc_stubs.c \
-      ${lib.optionalString enableGl "shims/egl/src/egl.c \\"}
-      ; do
-      [ -n "$src" ] || continue
+    CORE_SRCS="
+      shims/drm/displaysurface/src/DisplaySurface.m
+      shims/gbm/src/gbm.m
+      shims/drm/drm/src/drm_linux.c
+      shims/drm/drm/src/drm_ioctl.c
+      shims/drm/drm/src/drm_ios_ipc_stubs.c
+    "
+    ${lib.optionalString enableGl ''CORE_SRCS="$CORE_SRCS shims/egl/src/egl.c"''}
+    for src in $CORE_SRCS; do
       obj="$(basename "$src").o"
       echo "CC $src"
       "$CLANG" -c "$src" $COMMON_FLAGS -o "$obj"
