@@ -161,7 +161,16 @@ int wwn_modeb_scanout_holder_pid(void)
     fd = scanout_pidfile_fd();
     if (fd < 0)
         return -1;
-    if (flock(fd, LOCK_SH) != 0) {
+    if (flock(fd, LOCK_SH | LOCK_NB) != 0) {
+        if (errno == EWOULDBLOCK) {
+            /* Exclusive lease held by a DRM client; do not block igetty/inputd. */
+            if (scanout_read_pid(fd, &holder) == 0 && pid_alive(holder) && holder > 1) {
+                close(fd);
+                return (int)holder;
+            }
+            close(fd);
+            return 2;
+        }
         close(fd);
         return -1;
     }
@@ -177,7 +186,8 @@ int wwn_modeb_scanout_holder_pid(void)
 
 int wwn_modeb_scanout_is_held(void)
 {
-    return wwn_modeb_scanout_holder_pid() > 1;
+    int holder = wwn_modeb_scanout_holder_pid();
+    return holder > 1;
 }
 
 int wwn_modeb_scanout_is_held_except(pid_t except)
