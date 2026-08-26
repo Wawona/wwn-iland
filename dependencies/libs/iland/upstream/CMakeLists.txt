@@ -36,7 +36,7 @@ add_subdirectory(shims/libinput)
 add_subdirectory(shims/udev)
 
 # --- Output dylib: absorbs all shims, embeds amfiexceptiond + framebufferd + inputd ---
-add_library(wayland-mac SHARED shims/wayland-mac.c)
+add_library(wayland-mac SHARED shims/wayland-mac.c shims/modeb-coord.c)
 
 target_link_libraries(wayland-mac PRIVATE
   -Wl,-force_load,$<TARGET_FILE:dobby_static>

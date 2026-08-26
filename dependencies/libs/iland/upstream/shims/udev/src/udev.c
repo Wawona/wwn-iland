@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/types.h>
 
 static struct udev g_dev;
 static struct udev_device g_devnode_dev;
@@ -97,7 +98,8 @@ const char *udev_device_get_sysnum(struct udev_device *d) {
 
 dev_t udev_device_get_devnum(struct udev_device *d) {
     (void)d;
-    return 0;
+    /* Linux card0: major 226, minor 0. DrmNode::from_stat uses this after stat. */
+    return makedev(226, 0);
 }
 
 struct udev_enumerate *udev_enumerate_new(struct udev *u) {

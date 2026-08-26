@@ -9,6 +9,7 @@
 #include <bootstrap.h>
 #include <mach/mach_time.h>
 #include <input_ipc.h>
+#include "modeb-coord.h"
 
 #include <CoreFoundation/CoreFoundation.h>
 
@@ -555,7 +556,6 @@ static void modeb_write_vt(int vt)
 static void modeb_request_restore_aqua(void)
 {
     const char *stamp = "/tmp/libwayland-support/modeb-restore-aqua";
-    const char *pidfile = "/tmp/libwayland-support/modeb-compositor.pid";
     int fd = open(stamp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) {
         const char *msg = "ctrl-alt-backspace\n"; /* also Fn+chord / Delete */
@@ -563,15 +563,7 @@ static void modeb_request_restore_aqua(void)
         close(fd);
     }
     fprintf(stderr, "[inputd] Mode B restore Aqua requested\n");
-    FILE *pf = fopen(pidfile, "r");
-    if (pf) {
-        int pid = 0;
-        if (fscanf(pf, "%d", &pid) == 1 && pid > 1) {
-            kill(pid, SIGTERM);
-            fprintf(stderr, "[inputd] SIGTERM Mode B client pid=%d\n", pid);
-        }
-        fclose(pf);
-    }
+    wwn_modeb_scanout_stop_holder(-1);
 }
 
 /* Returns 1 if the key was consumed as a Mode B chord (do not fan out). */

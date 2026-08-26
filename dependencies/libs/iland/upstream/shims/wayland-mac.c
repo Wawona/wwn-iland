@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -23,6 +24,7 @@
 /* DRM ioctl dispatch — intercepts open/ioctl for /dev/dri/card* */
 #include <sys/ioctl.h>
 #include "drm_ioctl.h"
+#include "modeb-coord.h"
 
 /* epoll shim functions we hook into — forward-declared to avoid pulling
  * in epoll_shim_ctx.h and its system-compat dependencies */
@@ -86,6 +88,11 @@ typeof(poll)  *wrap_real_poll;
 typeof(fcntl) *wrap_real_fcntl;
 typeof(open)  *wrap_real_open;
 typeof(ioctl) *wrap_real_ioctl;
+typeof(stat)  *wrap_real_stat;
+typeof(lstat) *wrap_real_lstat;
+typeof(fstat) *wrap_real_fstat;
+typeof(fstatat) *wrap_real_fstatat;
+typeof(access) *wrap_real_access;
 
 static ssize_t hooked_read(int fd, void *buf, size_t nbytes)
 {
@@ -119,7 +126,106 @@ static int hooked_fcntl(int fd, int cmd, ...)
     return rv;
 }
 
-/* ── DRM open/ioctl hooks ───────────────────────────────────────────── */
+/* ── DRM open/ioctl/stat hooks ──────────────────────────────────────── */
+
+#define ILAND_DRM_MAJOR 226
+
+static int iland_drm_minor_for_name(const char *name)
+{
+    long n;
+
+    if (!name)
+        return -1;
+    if (strncmp(name, "card", 4) == 0) {
+        n = strtol(name + 4, NULL, 10);
+        return (n >= 0 && n < 256) ? (int)n : -1;
+    }
+    if (strncmp(name, "renderD", 7) == 0) {
+        n = strtol(name + 7, NULL, 10);
+        return (n >= 0 && n < 256) ? (int)n : -1;
+    }
+    return -1;
+}
+
+static int iland_drm_minor_from_path(const char *path)
+{
+    if (!path || strncmp(path, "/dev/dri/", 9) != 0)
+        return -1;
+    return iland_drm_minor_for_name(path + 9);
+}
+
+static void iland_fill_drm_stat(struct stat *st, int minor)
+{
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFCHR | 0666;
+    st->st_nlink = 1;
+    st->st_rdev = makedev(ILAND_DRM_MAJOR, (unsigned int)minor);
+    st->st_ino = (ino_t)((unsigned)minor + 1u);
+    st->st_uid = 0;
+    st->st_gid = 0;
+    st->st_blksize = 4096;
+}
+
+static void iland_note_drm_client_on_card_open(void)
+{
+    wwn_modeb_scanout_claim();
+}
+
+static void iland_clear_drm_client_pid_if_owned(void)
+{
+    wwn_modeb_scanout_release();
+}
+
+static int hooked_stat(const char *path, struct stat *st)
+{
+    int minor = iland_drm_minor_from_path(path);
+
+    if (minor >= 0) {
+        iland_fill_drm_stat(st, minor);
+        return 0;
+    }
+    return wrap_real_stat(path, st);
+}
+
+static int hooked_lstat(const char *path, struct stat *st)
+{
+    int minor = iland_drm_minor_from_path(path);
+
+    if (minor >= 0) {
+        iland_fill_drm_stat(st, minor);
+        return 0;
+    }
+    return wrap_real_lstat(path, st);
+}
+
+static int hooked_fstat(int fd, struct stat *st)
+{
+    if (fd == DRM_VIRTUAL_FD) {
+        iland_fill_drm_stat(st, 0);
+        return 0;
+    }
+    return wrap_real_fstat(fd, st);
+}
+
+static int hooked_fstatat(int dirfd, const char *path, struct stat *st, int flags)
+{
+    int minor = iland_drm_minor_from_path(path);
+
+    (void)flags;
+    (void)dirfd;
+    if (minor >= 0) {
+        iland_fill_drm_stat(st, minor);
+        return 0;
+    }
+    return wrap_real_fstatat(dirfd, path, st, flags);
+}
+
+static int hooked_access(const char *path, int mode)
+{
+    if (iland_drm_minor_from_path(path) >= 0)
+        return 0;
+    return wrap_real_access(path, mode);
+}
 
 static int hooked_open(const char *path, int flags, ...)
 {
@@ -130,8 +236,12 @@ static int hooked_open(const char *path, int flags, ...)
 
     /* iland userspace DRM. Never a real kernel node. card* and renderD*
      * both map to the virtual fd so niri/weston TTY backends match Linux. */
-    if (path && strncmp(path, "/dev/dri/", 9) == 0)
+    if (path && strncmp(path, "/dev/dri/", 9) == 0) {
+        if (iland_drm_minor_for_name(path + 9) >= 0 &&
+            strncmp(path + 9, "card", 4) == 0)
+            iland_note_drm_client_on_card_open();
         return DRM_VIRTUAL_FD;
+    }
     return wrap_real_open(path, flags, mode);
 }
 
@@ -380,6 +490,8 @@ static void stop_owned_helper(pid_t *pid, const char *name)
 __attribute__((destructor))
 static void wayland_mac_unload(void)
 {
+    iland_clear_drm_client_pid_if_owned();
+
     if (!g_owns_helpers)
         return;
 
@@ -409,6 +521,41 @@ static void install_drm_hooks(void)
                     (void **)&wrap_real_ioctl);
     if (ret != 0) {
         fprintf(stderr, "wayland-mac: error hooking \"ioctl\" with DobbyHook!\n");
+        abort();
+    }
+
+    ret = DobbyHook((void *)stat,      (void *)hooked_stat,
+                    (void **)&wrap_real_stat);
+    if (ret != 0) {
+        fprintf(stderr, "wayland-mac: error hooking \"stat\" with DobbyHook!\n");
+        abort();
+    }
+
+    ret = DobbyHook((void *)lstat,     (void *)hooked_lstat,
+                    (void **)&wrap_real_lstat);
+    if (ret != 0) {
+        fprintf(stderr, "wayland-mac: error hooking \"lstat\" with DobbyHook!\n");
+        abort();
+    }
+
+    ret = DobbyHook((void *)fstat,     (void *)hooked_fstat,
+                    (void **)&wrap_real_fstat);
+    if (ret != 0) {
+        fprintf(stderr, "wayland-mac: error hooking \"fstat\" with DobbyHook!\n");
+        abort();
+    }
+
+    ret = DobbyHook((void *)fstatat,   (void *)hooked_fstatat,
+                    (void **)&wrap_real_fstatat);
+    if (ret != 0) {
+        fprintf(stderr, "wayland-mac: error hooking \"fstatat\" with DobbyHook!\n");
+        abort();
+    }
+
+    ret = DobbyHook((void *)access,    (void *)hooked_access,
+                    (void **)&wrap_real_access);
+    if (ret != 0) {
+        fprintf(stderr, "wayland-mac: error hooking \"access\" with DobbyHook!\n");
         abort();
     }
 }

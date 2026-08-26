@@ -1,5 +1,6 @@
-add_executable(inputd inputd.c)
+add_executable(inputd inputd.c ../../modeb-coord.c)
 target_include_directories(inputd PRIVATE
+    ${CMAKE_SOURCE_DIR}/shims
     ${CMAKE_SOURCE_DIR}/shims/libinput/include
     /opt/local/include
 )
