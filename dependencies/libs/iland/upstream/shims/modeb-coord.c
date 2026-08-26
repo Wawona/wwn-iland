@@ -71,11 +71,15 @@ static void scanout_cleanup_stale(int fd)
 
 static int compositor_comm(const char *name)
 {
+    const char *base;
+
     if (!name || !name[0])
         return 0;
-    return strcmp(name, "weston") == 0 || strcmp(name, "niri") == 0 ||
-           strcmp(name, "kmscube") == 0 || strcmp(name, "gbm-es2-demo") == 0 ||
-           strcmp(name, "gbm_es2_demo") == 0 || strcmp(name, "vkcube-kms") == 0;
+    base = strrchr(name, '/');
+    base = base ? base + 1 : name;
+    return strcmp(base, "weston") == 0 || strcmp(base, "niri") == 0 ||
+           strcmp(base, "kmscube") == 0 || strcmp(base, "gbm-es2-demo") == 0 ||
+           strcmp(base, "gbm_es2_demo") == 0 || strcmp(base, "vkcube-kms") == 0;
 }
 
 static int proc_comm(pid_t pid, char *buf, size_t buflen)
