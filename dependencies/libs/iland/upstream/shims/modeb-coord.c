@@ -173,7 +173,7 @@ int wwn_modeb_scanout_holder_pid(void)
                 return (int)holder;
             }
             close(fd);
-            return 2;
+            return -1;
         }
         close(fd);
         return -1;
@@ -191,13 +191,15 @@ int wwn_modeb_scanout_holder_pid(void)
 int wwn_modeb_scanout_is_held(void)
 {
     int holder = wwn_modeb_scanout_holder_pid();
-    return holder > 1;
+
+    return holder > 1 && pid_alive((pid_t)holder);
 }
 
 int wwn_modeb_scanout_is_held_except(pid_t except)
 {
     int holder = wwn_modeb_scanout_holder_pid();
-    return holder > 1 && holder != (int)except;
+
+    return holder > 1 && holder != (int)except && pid_alive((pid_t)holder);
 }
 
 int wwn_modeb_scanout_stop_holder(pid_t except)
