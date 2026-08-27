@@ -146,6 +146,7 @@
           iland-tvos = tc.buildForTVOS "iland" { };
           iland-tvos-sim = tc.buildForTVOS "iland" { simulator = true; };
           iland-watchos = tc.buildForWatchOS "iland" { };
+          iland-watchos-sim = tc.buildForWatchOS "iland" { simulator = true; };
           iland-visionos = tc.buildForVisionOS "iland" { };
           iland-visionos-sim = tc.buildForVisionOS "iland" { simulator = true; };
           iland-macos = tc.buildForMacOS "iland" { };

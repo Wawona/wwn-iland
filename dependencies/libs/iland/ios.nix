@@ -98,11 +98,134 @@ pkgs.stdenv.mkDerivation {
   dontConfigure = true;
 
   # wayland-scanner is multi-output; take it from PATH.
-  nativeBuildInputs = [ waylandScanner ];
+    nativeBuildInputs = [ waylandScanner ] ++ lib.optionals isWatchOS [ pkgs.python3 ];
 
   postPatch = ''
+    ${lib.optionalString (!isWatchOS) ''
     find shims -type f \( -name '*.h' -o -name '*.m' -o -name '*.c' \) \
       -exec sed -i 's|IOSurface/IOSurface.h|IOSurface/IOSurfaceRef.h|g' {} +
+    ''}
+
+    ${lib.optionalString isWatchOS ''
+    WATCH_DIR="${./watch}"
+    cp -f "$WATCH_DIR/DisplaySurface.h" shims/drm/displaysurface/include/DisplaySurface.h
+    cp -f "$WATCH_DIR/iosurface_stub.h" shims/include/iosurface_stub.h
+    cp -f "$WATCH_DIR/DisplaySurface.c" shims/drm/displaysurface/src/DisplaySurface.c
+    cp -f "$WATCH_DIR/iosurface_stub.c" shims/include/iosurface_stub.c
+    cp -f "$WATCH_DIR/gbm_priv.h" shims/gbm/include/gbm_priv.h
+    cp -f "$WATCH_DIR/gbm.c" shims/gbm/src/gbm.c
+
+    # No IOSurface.framework on watchOS: route all includes to the malloc stub.
+    find shims -type f \( -name '*.h' -o -name '*.m' -o -name '*.c' \) -print0 \
+      | xargs -0 sed -i \
+        -e 's|#include <IOSurface/IOSurfaceRef.h>|#include "iosurface_stub.h"|g' \
+        -e 's|#include <IOSurface/IOSurface.h>|#include "iosurface_stub.h"|g' \
+        -e 's|#import <IOSurface/IOSurface.h>|#import "iosurface_stub.h"|g' \
+        -e 's|#import <IOSurface/IOSurfaceRef.h>|#import "iosurface_stub.h"|g'
+    # drm_linux.c: drop Apple CF/CG (CGBase typedefs a real IOSurfaceRef that
+    # conflicts with the malloc stub) — same posture as Android.
+    python3 - <<'PY'
+from pathlib import Path
+path = Path("shims/drm/drm/src/drm_linux.c")
+text = path.read_text()
+start = '    CFURLRef url = CFURLCreateWithFileSystemPath(NULL,'
+end = '    if (url) CFRelease(url);'
+si = text.find(start)
+ei = text.find(end)
+if si >= 0 and ei >= 0:
+    ei = text.find('\n', ei) + 1
+    text = text[:si] + text[ei:]
+path.write_text(text)
+PY
+    sed -i '/#include <IOSurface\//d' shims/drm/drm/src/drm_linux.c || true
+    sed -i '/#include <mach\/mach.h>/d' shims/drm/drm/src/drm_linux.c || true
+    sed -i '/#include <CoreFoundation\//d' shims/drm/drm/src/drm_linux.c || true
+    sed -i '/#include <CoreGraphics\//d' shims/drm/drm/src/drm_linux.c || true
+    sed -i '/#include "iosurface_stub.h"/d' shims/drm/drm/src/drm_linux.c || true
+    sed -i '1i #include "iosurface_stub.h"' shims/drm/drm/src/drm_linux.c
+    sed -i 's/mach_port_t surface_port/uint32_t surface_port/g' shims/drm/drm/src/drm_linux.c
+    sed -i 's/MACH_PORT_NULL/0/g' shims/drm/drm/src/drm_linux.c
+    sed -i 's/surface_port = IOSurfaceCreateMachPort(surf);/surface_port = 0; (void)surf;/g' \
+      shims/drm/drm/src/drm_linux.c
+    sed -i 's/mach_port_deallocate(mach_task_self(), surface_port);/(void)surface_port;/g' \
+      shims/drm/drm/src/drm_linux.c
+    # egl_wayland: CFSTR only for WWNBottomUp; stub no-ops IOSurfaceSetValue.
+    sed -i '/#include <CoreFoundation\//d' shims/egl/src/egl_wayland.c || true
+    # Prefer scalar RGBA↔BGRA (Accelerate is optional / heavy on watchOS).
+    sed -i '/#include <Accelerate\/Accelerate.h>/d' shims/egl/src/egl.c
+    python3 - <<'PY'
+from pathlib import Path
+path = Path("shims/egl/src/egl.c")
+text = path.read_text()
+old = """#if !defined(__ANDROID__)
+static const uint8_t kRGBAToBGRAMap[4] = { 2, 1, 0, 3 };
+#endif
+
+/* RGBA→BGRA after glReadPixels. Accelerate on Apple; scalar on Android
+ * (no Accelerate.framework in the NDK). */
+static void swap_rgba_to_bgra(uint8_t *dst8, uint32_t w, uint32_t h,
+                              size_t dst_pitch_bytes)
+{
+#if defined(__ANDROID__)
+    for (uint32_t y = 0; y < h; y++) {
+        uint8_t *row = dst8 + (size_t)y * dst_pitch_bytes;
+        for (uint32_t x = 0; x < w; x++) {
+            uint8_t *px = row + (size_t)x * 4;
+            uint8_t r = px[0], b = px[2];
+            px[0] = b;
+            px[2] = r;
+        }
+    }
+#else
+    vImage_Buffer buf = {
+        .data     = dst8,
+        .width    = w,
+        .height   = h,
+        .rowBytes = dst_pitch_bytes,
+    };
+    vImagePermuteChannels_ARGB8888(&buf, &buf, kRGBAToBGRAMap, 0);
+#endif
+}
+"""
+new = """#if !defined(__ANDROID__) && !defined(ILAND_WATCH_SHM_WINSYS)
+static const uint8_t kRGBAToBGRAMap[4] = { 2, 1, 0, 3 };
+#endif
+
+/* RGBA→BGRA after glReadPixels. Scalar on Android / Watch (no Accelerate). */
+static void swap_rgba_to_bgra(uint8_t *dst8, uint32_t w, uint32_t h,
+                              size_t dst_pitch_bytes)
+{
+#if defined(__ANDROID__) || defined(ILAND_WATCH_SHM_WINSYS)
+    for (uint32_t y = 0; y < h; y++) {
+        uint8_t *row = dst8 + (size_t)y * dst_pitch_bytes;
+        for (uint32_t x = 0; x < w; x++) {
+            uint8_t *px = row + (size_t)x * 4;
+            uint8_t r = px[0], b = px[2];
+            px[0] = b;
+            px[2] = r;
+        }
+    }
+#else
+    vImage_Buffer buf = {
+        .data     = dst8,
+        .width    = w,
+        .height   = h,
+        .rowBytes = dst_pitch_bytes,
+    };
+    vImagePermuteChannels_ARGB8888(&buf, &buf, kRGBAToBGRAMap, 0);
+#endif
+}
+"""
+if old not in text:
+    raise SystemExit("egl.c swap_rgba_to_bgra anchors missing for watch patch")
+text = text.replace(old, new, 1)
+zc = "        g_zerocopy_enabled = (e && e[0] == '0') ? 0 : 1;"
+if zc not in text:
+    raise SystemExit("egl.c zerocopy default anchor missing for watch")
+text = text.replace(zc, "        g_zerocopy_enabled = 0; (void)e;", 1)
+path.write_text(text)
+PY
+    ''}
 
     # iOS has no bootstrap.h — stub Mode B Mach IPC helpers (Mode A uses present callback).
     cat > shims/drm/drm/src/drm_ios_ipc_stubs.c <<'EOF'
@@ -163,10 +286,21 @@ EOF
 
     COMMON_FLAGS="-arch arm64 -isysroot $SDKROOT ${minFlag} -fPIC -O2 -std=c11 \
       ${angleStaticFlag} $INCLUDES -framework Foundation \
-      -framework CoreFoundation -framework CoreGraphics -framework QuartzCore \
-      ${if isWatchOS then "" else "-framework IOSurface -framework Metal"}"
+      -framework CoreFoundation \
+      ${if isWatchOS then "" else "-framework CoreGraphics -framework QuartzCore -framework IOSurface -framework Metal"}"
 
     OBJS=""
+    ${if isWatchOS then ''
+    CORE_SRCS="
+      shims/drm/displaysurface/src/DisplaySurface.c
+      shims/include/iosurface_stub.c
+      shims/gbm/src/gbm.c
+      shims/drm/drm/src/drm_linux.c
+      shims/drm/drm/src/drm_ioctl.c
+      shims/drm/drm/src/drm_ios_ipc_stubs.c
+      shims/egl/src/iland_wl_ops.c
+    "
+    '' else ''
     CORE_SRCS="
       shims/drm/displaysurface/src/DisplaySurface.m
       shims/gbm/src/gbm.m
@@ -175,6 +309,7 @@ EOF
       shims/drm/drm/src/drm_ios_ipc_stubs.c
       shims/egl/src/iland_wl_ops.c
     "
+    ''}
     ${lib.optionalString enableGl ''CORE_SRCS="$CORE_SRCS shims/egl/src/egl.c"''}
     for src in $CORE_SRCS; do
       obj="$(basename "$src").o"
