@@ -378,6 +378,9 @@ EOF
     cp shims/wayland-egl/include/iland_wayland_egl.h $out/include/
     cp shims/vulkan-wayland/include/iland_vk_wayland.h $out/include/
     cp shims/drm/displaysurface/include/DisplaySurface.h $out/include/
+    ${lib.optionalString isWatchOS ''
+    cp shims/include/iosurface_stub.h                    $out/include/
+    ''}
     cp shims/include/drm_fourcc.h                    $out/include/
     cp shims/include/xf86drm.h                       $out/include/
     cp shims/include/xf86drmMode.h                   $out/include/
