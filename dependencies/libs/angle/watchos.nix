@@ -103,6 +103,8 @@ PY
     "use_blink=true"
     "angle_enable_metal=false"
     "angle_enable_vulkan=true"
+    # Headless Vulkan display (pbuffers). Avoids DisplayVkMac / Metal WSI on Watch.
+    "angle_use_vulkan_null_display=true"
     # Avoid Linux vulkan-loader (FALLBACK_CONFIG_DIRS / SYSCONFDIR). ICD is
     # static SwiftShader force-loaded into the watch binary.
     "angle_shared_libvulkan=false"
