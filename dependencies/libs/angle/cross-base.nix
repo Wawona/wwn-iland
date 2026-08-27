@@ -9,6 +9,7 @@
   patchesExtra ? [ ],
   preConfigureHook ? "",
   installHook ? "",
+  postPatchExtra ? "",
   nativeBuildInputsExtra ? [ ],
   buildInputsExtra ? [ ],
   ...
@@ -100,6 +101,7 @@ pkgs.stdenv.mkDerivation (finalAttrs: {
     generate_location_tags = false
     EOF
     patchShebangs build/toolchain/apple || true
+    ${postPatchExtra}
   '';
 
   preConfigure = preConfigureHook;

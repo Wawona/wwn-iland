@@ -78,7 +78,7 @@
           # target_platform=tvos. Cited: Wawona/docs/wwn-repo-dag.md.
           tvos = ./dependencies/libs/angle/ios.nix;
           visionos = ./dependencies/libs/angle/ios.nix;
-          watchos = null;
+          watchos = ./dependencies/libs/angle/watchos.nix;
           macos = ./dependencies/libs/angle/macos.nix;
         };
         swiftshader = withPlatformVariants {
@@ -87,6 +87,7 @@
           ios = ./dependencies/libs/swiftshader/ios.nix;
           ipados = ./dependencies/libs/swiftshader/ios.nix;
           visionos = ./dependencies/libs/swiftshader/ios.nix;
+          watchos = ./dependencies/libs/swiftshader/watchos.nix;
           macos = ./dependencies/libs/swiftshader/macos.nix;
         };
         moltenvk = withPlatformVariants {
@@ -167,6 +168,10 @@
           swiftshader-ios = tc.buildForIOS "swiftshader" { };
           swiftshader-ios-sim = tc.buildForIOS "swiftshader" { simulator = true; };
           swiftshader-visionos-sim = tc.buildForVisionOS "swiftshader" { simulator = true; };
+          swiftshader-watchos = tc.buildForWatchOS "swiftshader" { };
+          swiftshader-watchos-sim = tc.buildForWatchOS "swiftshader" { simulator = true; };
+          angle-watchos = tc.buildForWatchOS "angle" { };
+          angle-watchos-sim = tc.buildForWatchOS "angle" { simulator = true; };
         } else { }) // {
           iland-android = tc.buildForAndroid "iland" { };
           swiftshader-android = tc.buildForAndroid "swiftshader" { };

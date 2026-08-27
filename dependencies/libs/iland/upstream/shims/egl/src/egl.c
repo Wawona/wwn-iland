@@ -2136,7 +2136,60 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
         uint32_t h = ss->height;
         size_t total = (size_t)w * h * 4;
 
-        if (!g_glReadPixels || !iosurf)
+        if (!g_glReadPixels)
+            return real_eglSwapBuffers(sd->angle_display, ss->angle_surface);
+
+#ifdef ILAND_WATCH_SHM_WINSYS
+        if (!iosurf) {
+            if (g_pixels_sz < total) {
+                void *p = realloc(g_pixels, total);
+                if (!p)
+                    return real_eglSwapBuffers(sd->angle_display, ss->angle_surface);
+                g_pixels = p;
+                g_pixels_sz = total;
+            }
+
+            g_glReadPixels(0, 0, (int)w, (int)h, 0x1908, 0x1401, g_pixels);
+
+            EGLBoolean ret =
+                real_eglSwapBuffers(sd->angle_display, ss->angle_surface);
+            if (!ret) return ret;
+
+            if (iland_wl_swapchain_present_pixels(ss->wl_swapchain, g_pixels,
+                                                    (uint32_t)(w * 4)) != 0)
+                return EGL_FALSE;
+
+            if (iland_wl_swapchain_check_resize(ss->wl_swapchain)) {
+                iland_wl_swapchain_get_size(ss->wl_swapchain, &ss->width,
+                                            &ss->height);
+                if (ss->angle_surface) {
+                    real_eglDestroySurface(sd->angle_display, ss->angle_surface);
+                    ss->angle_surface = EGL_NO_SURFACE;
+                }
+                EGLint pb_attribs[] = {
+                    EGL_WIDTH,  (EGLint)ss->width,
+                    EGL_HEIGHT, (EGLint)ss->height,
+                    EGL_NONE
+                };
+                ss->angle_surface = real_eglCreatePbufferSurface(
+                    sd->angle_display, ss->config, pb_attribs);
+                if (ss->angle_surface) {
+                    EGLContext cur = real_eglGetCurrentContext
+                                         ? real_eglGetCurrentContext()
+                                         : EGL_NO_CONTEXT;
+                    if (cur != EGL_NO_CONTEXT)
+                        real_eglMakeCurrent(sd->angle_display, ss->angle_surface,
+                                            ss->angle_surface, cur);
+                }
+            }
+
+            int slot = iland_wl_swapchain_acquire(ss->wl_swapchain);
+            if (slot < 0) return EGL_FALSE;
+            return wl_bind_slot(sd, ss, slot);
+        }
+#endif
+
+        if (!iosurf)
             return real_eglSwapBuffers(sd->angle_display, ss->angle_surface);
 
         if (g_pixels_sz < total) {

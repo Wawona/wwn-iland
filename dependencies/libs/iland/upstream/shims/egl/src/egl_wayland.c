@@ -18,9 +18,16 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef ILAND_WATCH_SHM_WINSYS
+#include <sys/mman.h>
+#include <sys/stat.h>
+#endif
+
 #include <wayland-client.h>
 
+#ifndef ILAND_WATCH_SHM_WINSYS
 #include "linux-dmabuf-v1-client-protocol.h"
+#endif
 
 #include "DisplaySurface.h"
 #include "drm_fourcc.h"
@@ -35,10 +42,19 @@
 struct IlandWlWinsys {
     struct wl_display *display;
     struct wl_event_queue *queue;
+#ifdef ILAND_WATCH_SHM_WINSYS
+    struct wl_shm *shm;
+#else
     struct zwp_linux_dmabuf_v1 *dmabuf;
+#endif
 };
 
 typedef struct {
+#ifdef ILAND_WATCH_SHM_WINSYS
+    struct wl_shm_pool *pool;
+    void *shm_map;
+    size_t shm_size;
+#endif
     DisplaySurfaceInfo info;
     struct wl_buffer *buffer;
     int busy;
@@ -66,12 +82,19 @@ static void registry_global(void *data, struct wl_registry *registry,
 {
     IlandWlWinsys *ws = (IlandWlWinsys *)data;
 
+#ifndef ILAND_WATCH_SHM_WINSYS
     if (strcmp(interface, "zwp_linux_dmabuf_v1") == 0 && !ws->dmabuf) {
         uint32_t want = version < 3 ? version : 3;
         ws->dmabuf = (struct zwp_linux_dmabuf_v1 *)
             wl_registry_bind(registry, name,
                              &zwp_linux_dmabuf_v1_interface, want);
     }
+#else
+    if (strcmp(interface, "wl_shm") == 0 && !ws->shm) {
+        ws->shm = (struct wl_shm *)wl_registry_bind(
+            registry, name, &wl_shm_interface, 1);
+    }
+#endif
 }
 
 static void registry_global_remove(void *data, struct wl_registry *registry,
@@ -119,9 +142,20 @@ IlandWlWinsys *iland_wl_winsys_create(struct wl_display *display)
 
     wl_registry_destroy(registry);
 
-    if (!ok || !ws->dmabuf) {
+    if (!ok
+#ifndef ILAND_WATCH_SHM_WINSYS
+        || !ws->dmabuf
+#else
+        || !ws->shm
+#endif
+    ) {
+#ifndef ILAND_WATCH_SHM_WINSYS
         if (ws->dmabuf)
             zwp_linux_dmabuf_v1_destroy(ws->dmabuf);
+#else
+        if (ws->shm)
+            wl_shm_destroy(ws->shm);
+#endif
         wl_event_queue_destroy(ws->queue);
         free(ws);
         return NULL;
@@ -134,8 +168,13 @@ void iland_wl_winsys_destroy(IlandWlWinsys *ws)
 {
     if (!ws)
         return;
+#ifndef ILAND_WATCH_SHM_WINSYS
     if (ws->dmabuf)
         zwp_linux_dmabuf_v1_destroy(ws->dmabuf);
+#else
+    if (ws->shm)
+        wl_shm_destroy(ws->shm);
+#endif
     if (ws->queue)
         wl_event_queue_destroy(ws->queue);
     free(ws);
@@ -162,13 +201,73 @@ static void slot_free(IlandWlSlot *slot)
         wl_buffer_destroy(slot->buffer);
         slot->buffer = NULL;
     }
+#ifdef ILAND_WATCH_SHM_WINSYS
+    if (slot->pool) {
+        wl_shm_pool_destroy(slot->pool);
+        slot->pool = NULL;
+    }
+    if (slot->shm_map && slot->shm_map != MAP_FAILED) {
+        munmap(slot->shm_map, slot->shm_size);
+        slot->shm_map = NULL;
+        slot->shm_size = 0;
+    }
+#else
     if (slot->info.surface)
         DisplaySurface_destroy(&slot->info);
+#endif
     slot->busy = 0;
 }
 
 static int slot_alloc(IlandWlSwapchain *sc, IlandWlSlot *slot)
 {
+#ifdef ILAND_WATCH_SHM_WINSYS
+    uint32_t stride = sc->width * 4u;
+    size_t size = (size_t)stride * sc->height;
+    if (size == 0)
+        return -1;
+
+    int fd = -1;
+    char tmpl[] = "/tmp/iland-watch-shm-XXXXXX";
+    fd = mkstemp(tmpl);
+    if (fd < 0)
+        return -1;
+    if (ftruncate(fd, (off_t)size) != 0) {
+        close(fd);
+        unlink(tmpl);
+        return -1;
+    }
+    unlink(tmpl);
+
+    void *map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+        close(fd);
+        return -1;
+    }
+    memset(map, 0, size);
+
+    slot->shm_map = map;
+    slot->shm_size = size;
+    slot->pool = wl_shm_create_pool(sc->ws->shm, fd, (int32_t)size);
+    close(fd);
+    if (!slot->pool) {
+        munmap(map, size);
+        slot->shm_map = NULL;
+        return -1;
+    }
+
+    slot->buffer = wl_shm_pool_create_buffer(
+        slot->pool, 0, (int32_t)sc->width, (int32_t)sc->height,
+        (int32_t)stride, WL_SHM_FORMAT_ARGB8888);
+    if (!slot->buffer) {
+        slot_free(slot);
+        return -1;
+    }
+
+    wl_proxy_set_queue((struct wl_proxy *)slot->buffer, sc->ws->queue);
+    wl_buffer_add_listener(slot->buffer, &buffer_listener, slot);
+    slot->busy = 0;
+    return 0;
+#else
     /* Global: the compositor is a separate process for a bundled client, and
      * all it gets is the id in the modifier. */
     slot->info = DisplaySurface_create_global(sc->width, sc->height,
@@ -231,6 +330,7 @@ static int slot_alloc(IlandWlSwapchain *sc, IlandWlSlot *slot)
     wl_buffer_add_listener(slot->buffer, &buffer_listener, slot);
     slot->busy = 0;
     return 0;
+#endif
 }
 
 static void slots_free(IlandWlSwapchain *sc)
@@ -263,7 +363,13 @@ IlandWlSwapchain *iland_wl_swapchain_create_for_surface(
     IlandWlWinsys *ws, struct wl_surface *surface, uint32_t width,
     uint32_t height, int orientation)
 {
-    if (!ws || !ws->dmabuf || !surface || width == 0 || height == 0)
+    if (!ws
+#ifndef ILAND_WATCH_SHM_WINSYS
+        || !ws->dmabuf
+#else
+        || !ws->shm
+#endif
+        || !surface || width == 0 || height == 0)
         return NULL;
 
     IlandWlSwapchain *sc = calloc(1, sizeof(*sc));
@@ -290,8 +396,15 @@ IlandWlSwapchain *iland_wl_swapchain_create_for_surface(
 IlandWlSwapchain *iland_wl_swapchain_create(IlandWlWinsys *ws,
                                             struct wl_egl_window *win)
 {
-    if (!ws || !ws->dmabuf || !iland_wl_egl_window_is_valid(win))
+    if (!ws || !iland_wl_egl_window_is_valid(win))
         return NULL;
+#ifndef ILAND_WATCH_SHM_WINSYS
+    if (!ws->dmabuf)
+        return NULL;
+#else
+    if (!ws->shm)
+        return NULL;
+#endif
 
     struct wl_surface *surface = iland_wl_egl_window_get_surface(win);
     if (!surface)
@@ -405,6 +518,21 @@ int iland_wl_swapchain_present_pixels(IlandWlSwapchain *sc, const void *pixels,
         return -1;
 
     IlandWlSlot *s = &sc->slots[slot];
+#ifdef ILAND_WATCH_SHM_WINSYS
+    if (!s->shm_map || !s->buffer)
+        return -1;
+
+    size_t row_bytes = (size_t)sc->width * 4u;
+    if (stride_bytes < row_bytes)
+        return -1;
+
+    const uint8_t *src = (const uint8_t *)pixels;
+    uint8_t *dst = (uint8_t *)s->shm_map;
+    for (uint32_t y = 0; y < sc->height; y++) {
+        memcpy(dst + (size_t)y * row_bytes,
+               src + (size_t)y * stride_bytes, row_bytes);
+    }
+#else
     IOSurfaceRef io = s->info.surface;
     if (!io || !s->buffer)
         return -1;
@@ -428,6 +556,7 @@ int iland_wl_swapchain_present_pixels(IlandWlSwapchain *sc, const void *pixels,
                src + (size_t)y * stride_bytes, row_bytes);
     }
     IOSurfaceUnlock(io, 0, NULL);
+#endif
 
     return iland_wl_swapchain_post(sc, slot);
 }

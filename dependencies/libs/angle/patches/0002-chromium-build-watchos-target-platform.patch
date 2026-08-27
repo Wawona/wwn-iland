@@ -1,0 +1,12 @@
+diff --git a/build/config/apple/mobile_config.gni b/build/config/apple/mobile_config.gni
+index 7d5be30..a1c2d3e 100644
+--- a/build/config/apple/mobile_config.gni
++++ b/build/config/apple/mobile_config.gni
+@@ -75,6 +75,7 @@ if (is_ios || is_watchos) {
+     _target_platforms += [
+       "iphoneos",
+       "tvos",
++      "watchos",
+     ]
+   }
+   assert(filter_include([ target_platform ], _target_platforms) != [],

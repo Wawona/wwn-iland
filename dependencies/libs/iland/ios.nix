@@ -3,7 +3,8 @@
 # Builds the IOSurface-backed Linux-graphics compat shims as a static archive
 # (libiland_userland.a). GLES/EGL links ANGLE when enableGl is true
 # (ILAND_ANGLE_STATIC, no dlopen). tvOS uses the same recipe with ANGLE
-# from source GN (target_platform=tvos). watchOS stays enableGl=false.
+# from source GN (target_platform=tvos). watchOS uses CPU ANGLE+SwiftShader with
+# wl_shm readback (ILAND_WATCH_SHM_WINSYS).
 {
   lib,
   pkgs,
@@ -19,15 +20,18 @@
 }:
 
 let
+  isWatchOS = iosToolchain.isWatchOSToolchain or false;
+  buildForMobile = name:
+    if isWatchOS then
+      buildModule.buildForWatchOS name { inherit simulator; }
+    else
+      buildModule.buildForIOS name { inherit simulator; };
   angle =
     if enableGl then
-      buildModule.buildForIOS "angle" { inherit simulator; }
+      buildForMobile "angle"
     else
       null;
-  # Wayland-EGL winsys (same IOSurface-as-dmabuf path as macOS): libwayland-client
-  # for the protocol calls, scanner + XML for the linux-dmabuf client bindings.
-  # Vulkan WSI uses this winsys without ANGLE (egl_wayland.c has no EGL includes).
-  libwayland = buildModule.buildForIOS "libwayland" { inherit simulator; };
+  libwayland = buildForMobile "libwayland";
   waylandScanner = pkgs.wayland-scanner;
   waylandProtocols = pkgs.wayland-protocols;
   angleLinkKind =
@@ -37,7 +41,9 @@ let
       lib.strings.trim (builtins.readFile "${angle}/nix-support/link-kind")
     else
       "static";
-  angleStaticFlag = if angleLinkKind == "static" then "-DILAND_ANGLE_STATIC" else "";
+  angleStaticFlag =
+    (if angleLinkKind == "static" then "-DILAND_ANGLE_STATIC" else "")
+    + (if isWatchOS then " -DILAND_WATCH_SHM_WINSYS" else "");
   angleIncludes =
     if angle == null then
       ""
@@ -49,10 +55,14 @@ let
   isTVOS = iosToolchain.isTVOSToolchain or false;
   minVersion =
     iosToolchain.deploymentTarget or (
-      if isVisionOS then "26.0" else "17.0"
+      if isWatchOS then "10.0"
+      else if isVisionOS then "26.0"
+      else "17.0"
     );
   sdkPlatform =
-    if isVisionOS then
+    if isWatchOS then
+      if simulator then "WatchSimulator" else "WatchOS"
+    else if isVisionOS then
       if simulator then "XRSimulator" else "XROS"
     else if isTVOS then
       if simulator then "AppleTVSimulator" else "AppleTVOS"
@@ -61,7 +71,11 @@ let
     else
       "iPhoneOS";
   minFlag =
-    if isVisionOS && simulator then
+    if isWatchOS && simulator then
+      "-mwatchos-simulator-version-min=${minVersion}"
+    else if isWatchOS then
+      "-mwatchos-version-min=${minVersion}"
+    else if isVisionOS && simulator then
       "-target arm64-apple-xros${minVersion}-simulator"
     else if isVisionOS then
       "-target arm64-apple-xros${minVersion}"
@@ -128,10 +142,12 @@ EOF
     CLANG="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"
     AR="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/ar"
 
-    # linux-dmabuf client bindings for the Wayland-EGL winsys.
+    # linux-dmabuf client bindings for the Wayland-EGL winsys (not on watch SHM).
+    ${lib.optionalString (!isWatchOS) ''
     DMABUF_XML="${waylandProtocols}/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml"
     wayland-scanner client-header "$DMABUF_XML" linux-dmabuf-v1-client-protocol.h
     wayland-scanner private-code  "$DMABUF_XML" linux-dmabuf-v1-protocol.c
+    ''}
 
     INCLUDES="\
       -I. \
@@ -146,8 +162,9 @@ EOF
       ${angleIncludes}"
 
     COMMON_FLAGS="-arch arm64 -isysroot $SDKROOT ${minFlag} -fPIC -O2 -std=c11 \
-      ${angleStaticFlag} $INCLUDES -framework IOSurface -framework Foundation \
-      -framework CoreFoundation -framework CoreGraphics -framework QuartzCore -framework Metal"
+      ${angleStaticFlag} $INCLUDES -framework Foundation \
+      -framework CoreFoundation -framework CoreGraphics -framework QuartzCore \
+      ${if isWatchOS then "" else "-framework IOSurface -framework Metal"}"
 
     OBJS=""
     CORE_SRCS="
@@ -177,7 +194,7 @@ EOF
     for src in \
       shims/wayland-egl/src/wayland_egl.c \
       shims/egl/src/egl_wayland.c \
-      linux-dmabuf-v1-protocol.c; do
+      ${if isWatchOS then "" else "linux-dmabuf-v1-protocol.c"}; do
       obj="wl_$(basename "$src").o"
       echo "CC $src"
       "$CLANG" -c "$src" $COMMON_FLAGS -o "$obj"
@@ -198,7 +215,7 @@ EOF
     echo "_zwp_linux_*" > unexported-protocol.txt
     "$CLANG" -r -nostdlib -arch arm64 -isysroot "$SDKROOT" ${minFlag} \
       -o iland_wayland_egl.o $WL_OBJS \
-      -Wl,-unexported_symbols_list,unexported-protocol.txt
+      ${lib.optionalString (!isWatchOS) "-Wl,-unexported_symbols_list,unexported-protocol.txt"}
 
     "$AR" rcs libiland_wayland_egl.a iland_wayland_egl.o
 

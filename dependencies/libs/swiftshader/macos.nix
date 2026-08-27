@@ -12,6 +12,10 @@
   # Extra -D flags the simulator variant needs (CMAKE_SYSTEM_NAME=iOS,
   # CMAKE_OSX_ARCHITECTURES, CMAKE_OSX_DEPLOYMENT_TARGET, …).
   extraCmakeFlags ? [ ],
+  # watchOS cross build (see watchos.nix). No Metal in OS_LIBS.
+  watchOsBuild ? false,
+  # watchOS store path: static ICD archive for in-process link.
+  installStaticIcd ? false,
   ...
 }:
 
@@ -46,10 +50,29 @@ let
     rev = "e2239ee6043f73722e7aa812a459f54a28552929";
     hash = "sha256-SjlJxushfry13RGA7BCjYC9oZqV4z6x8dOiHfl/wpF0=";
   };
+  isWatch = builtins.elem appleSdk [ "watchos" "watchsimulator" ];
   isSimulator = appleSdk != "macosx";
+  isCrossApple = isSimulator;
+  sdkPlatformName =
+    if appleSdk == "watchsimulator" then "WatchSimulator"
+    else if appleSdk == "watchos" then "WatchOS"
+    else if appleSdk == "iphonesimulator" then "iPhoneSimulator"
+    else "MacOSX";
+  sdkLeafName =
+    if appleSdk == "watchsimulator" then "WatchSimulator"
+    else if appleSdk == "watchos" then "WatchOS"
+    else if appleSdk == "iphonesimulator" then "iPhoneSimulator"
+    else "MacOSX";
 in
 pkgs.stdenv.mkDerivation {
-  pname = "swiftshader-${if isSimulator then "ios-sim" else "macos"}";
+  pname = "swiftshader-${
+    if isWatch then
+      if appleSdk == "watchsimulator" then "watchos-sim" else "watchos"
+    else if isSimulator then
+      "ios-sim"
+    else
+      "macos"
+  }";
   version = "436722b";
   inherit src;
 
@@ -83,7 +106,7 @@ pkgs.stdenv.mkDerivation {
         's/cmake_minimum_required\(VERSION [0-9]+(\.[0-9]+)*/cmake_minimum_required(VERSION 3.5/' \
         "$f" || true
     done
-${lib.optionalString isSimulator ''
+${lib.optionalString (isCrossApple && !isWatch) ''
     # The iOS-Simulator SDK has no Cocoa or Quartz (macOS umbrella) frameworks, so
     # SwiftShader's APPLE branch find_library(Cocoa/Quartz) resolves to NOTFOUND
     # and the generate step aborts. They are only used for SwiftShader's macOS
@@ -104,7 +127,123 @@ ${lib.optionalString isSimulator ''
     # Wawona presents through iland regardless.
     perl -0777 -pi -e 's{\#include <AppKit/NSView.h>}{#include <TargetConditionals.h>\n#if TARGET_OS_IPHONE\n#import <UIKit/UIKit.h>\n#define NSView UIView\n#else\n#include <AppKit/NSView.h>\n#endif}' \
       src/WSI/MetalSurface.mm
-  ''}'';
+''}
+${lib.optionalString isWatch ''
+    # watchOS: no Cocoa, Quartz, Metal, or UIKit window harness. Headless CPU ICD only.
+    sed -i.bak \
+      -e '/find_library(COCOA_FRAMEWORK Cocoa)/d' \
+      -e '/find_library(QUARTZ_FRAMEWORK Quartz)/d' \
+      -e '/find_library(METAL_FRAMEWORK Metal)/d' \
+      -e 's|set(OS_LIBS "''${COCOA_FRAMEWORK}" "''${QUARTZ_FRAMEWORK}" "''${CORE_FOUNDATION_FRAMEWORK}" "''${IOSURFACE_FRAMEWORK}" "''${METAL_FRAMEWORK}")|set(OS_LIBS "''${CORE_FOUNDATION_FRAMEWORK}" "-framework Foundation")|' \
+      CMakeLists.txt
+    # SPIRV-Tools fatal-errors on watchOS; downgrade to a status line (headless ICD).
+    if [ -f third_party/SPIRV-Tools/CMakeLists.txt ]; then
+      sed -i.bak \
+        's/message(FATAL_ERROR "Your platform .* is not supported!")/message(STATUS "SPIRV-Tools: watchOS allowed by Wawona patch")/' \
+        third_party/SPIRV-Tools/CMakeLists.txt
+    fi
+    # LLVM Program.inc uses fork/exec/spawn APIs unavailable on watchOS.
+    for llvm_prog_inc in \
+      third_party/llvm-10.0/llvm/lib/Support/Unix/Program.inc \
+      third_party/llvm-subzero/lib/Support/Unix/Program.inc; do
+      if [ -f "$llvm_prog_inc" ]; then
+        cat > "$TMPDIR/wwn-watch-program-stub.h" <<'EOF'
+/* Wawona watchOS SwiftShader stubs (prepended to LLVM Program.inc). */
+#include <sys/types.h>
+#include <sys/stat.h>
+typedef struct { int _stub; } wwn_watch_spawn_actions_t;
+typedef wwn_watch_spawn_actions_t posix_spawn_file_actions_t;
+static inline int wwn_watch_no_execve(const char *path, char *const argv[], char *const envp[]) {
+  (void)path; (void)argv; (void)envp; return -1;
+}
+static inline int wwn_watch_no_execv(const char *path, char *const argv[]) {
+  (void)path; (void)argv; return -1;
+}
+static inline pid_t wwn_watch_no_fork(void) { return -1; }
+static inline int wwn_watch_posix_spawn(pid_t *pid, const char *path,
+    const wwn_watch_spawn_actions_t *actions, const void *attrp,
+    char *const argv[], char *const envp[]) {
+  (void)pid; (void)path; (void)actions; (void)attrp; (void)argv; (void)envp; return -1;
+}
+static inline int wwn_watch_spawn_actions_addopen(wwn_watch_spawn_actions_t *a,
+    int fd, const char *path, int oflag, mode_t mode) {
+  (void)a; (void)fd; (void)path; (void)oflag; (void)mode; return 0;
+}
+static inline int wwn_watch_spawn_actions_init(wwn_watch_spawn_actions_t *a) {
+  (void)a; return 0;
+}
+static inline int wwn_watch_spawn_actions_destroy(wwn_watch_spawn_actions_t *a) {
+  (void)a; return 0;
+}
+static inline int wwn_watch_spawn_actions_adddup2(wwn_watch_spawn_actions_t *a,
+    int fd1, int fd2) {
+  (void)a; (void)fd1; (void)fd2; return 0;
+}
+EOF
+        cat "$TMPDIR/wwn-watch-program-stub.h" "$llvm_prog_inc" > "$TMPDIR/Program.inc.patched"
+        mv "$TMPDIR/Program.inc.patched" "$llvm_prog_inc"
+        sed -i.bak \
+          -e 's/\bexecve(/wwn_watch_no_execve(/g' \
+          -e 's/\bexecv(/wwn_watch_no_execv(/g' \
+          -e 's/\bfork(/wwn_watch_no_fork(/g' \
+          -e 's/\bposix_spawn(/wwn_watch_posix_spawn(/g' \
+          -e 's/\bposix_spawn_file_actions_init(/wwn_watch_spawn_actions_init(/g' \
+          -e 's/\bposix_spawn_file_actions_destroy(/wwn_watch_spawn_actions_destroy(/g' \
+          -e 's/\bposix_spawn_file_actions_adddup2(/wwn_watch_spawn_actions_adddup2(/g' \
+          -e 's/\bposix_spawn_file_actions_addopen(/wwn_watch_spawn_actions_addopen(/g' \
+          "$llvm_prog_inc"
+        # Drop spawn.h; stubs replace the unavailable declarations.
+        sed -i.bak '/#include <spawn.h>/d' "$llvm_prog_inc"
+      fi
+    done
+    # Subzero/LLVM Process.inc uses Mach exception ports unavailable on watchOS.
+    for llvm_proc_inc in \
+      third_party/llvm-subzero/lib/Support/Unix/Process.inc \
+      third_party/llvm-10.0/llvm/lib/Support/Unix/Process.inc; do
+      if [ -f "$llvm_proc_inc" ]; then
+      cat > "$TMPDIR/wwn-watch-process-stub.h" <<'EOF'
+/* Wawona watchOS SwiftShader: Mach exception ports unavailable on watchOS. */
+#include <mach/mach.h>
+static inline kern_return_t wwn_watch_task_get_exception_ports(
+    task_t task, exception_mask_t mask, exception_mask_array_t masks,
+    mach_msg_type_number_t *count, exception_handler_array_t handlers,
+    exception_behavior_array_t behaviors, thread_state_flavor_array_t flavors) {
+  (void)task; (void)mask; (void)masks; (void)count; (void)handlers;
+  (void)behaviors; (void)flavors;
+  return KERN_FAILURE;
+}
+static inline kern_return_t wwn_watch_task_set_exception_ports(
+    task_t task, exception_mask_t mask, mach_port_t port, exception_behavior_t behavior,
+    thread_state_flavor_t flavor) {
+  (void)task; (void)mask; (void)port; (void)behavior; (void)flavor;
+  return KERN_SUCCESS;
+}
+#define task_get_exception_ports(task, mask, masks, count, handlers, behaviors, flavors) \
+  wwn_watch_task_get_exception_ports((task), (mask), (masks), (count), (handlers), (behaviors), (flavors))
+#define task_set_exception_ports(task, mask, port, behavior, flavor) \
+  wwn_watch_task_set_exception_ports((task), (mask), (port), (behavior), (flavor))
+EOF
+      cat "$TMPDIR/wwn-watch-process-stub.h" "$llvm_proc_inc" > "$TMPDIR/Process.inc.patched"
+      mv "$TMPDIR/Process.inc.patched" "$llvm_proc_inc"
+      sed -i.bak \
+        -e 's/\btask_get_exception_ports(/wwn_watch_task_get_exception_ports(/g' \
+        -e 's/\btask_set_exception_ports(/wwn_watch_task_set_exception_ports(/g' \
+        "$llvm_proc_inc"
+      fi
+    done
+    perl -0777 -pi -e 's{\#include <AppKit/NSView.h>}{#define SWIFTSHADER_WATCHOS_HEADLESS 1}' \
+      src/WSI/MetalSurface.mm || true
+    # Headless watch ICD: no Metal WSI (SDK has no Metal.framework).
+    if [ -f src/WSI/CMakeLists.txt ]; then
+      sed -i.bak '/MetalSurface.mm/d' src/WSI/CMakeLists.txt
+    fi
+    find . -name CMakeLists.txt 2>/dev/null | while IFS= read -r f; do
+      sed -i.bak \
+        -e '/VK_USE_PLATFORM_METAL_EXT/d' \
+        -e '/VK_USE_PLATFORM_MACOS_MVK/d' \
+        "$f" || true
+    done
+''}'';
 
   configurePhase = ''
     runHook preConfigure
@@ -112,18 +251,14 @@ ${lib.optionalString isSimulator ''
     unset DEVELOPER_DIR
     SDKROOT=$(xcrun --sdk ${appleSdk} --show-sdk-path 2>/dev/null || true)
     if [ ! -d "$SDKROOT" ]; then
-      SDKROOT=$(${xcodeUtils.findXcodeScript}/bin/find-xcode)/Contents/Developer/Platforms/${
-        if appleSdk == "iphonesimulator" then "iPhoneSimulator" else "MacOSX"
-      }.platform/Developer/SDKs/${
-        if appleSdk == "iphonesimulator" then "iPhoneSimulator" else "MacOSX"
-      }.sdk
+      SDKROOT=$(${xcodeUtils.findXcodeScript}/bin/find-xcode)/Contents/Developer/Platforms/${sdkPlatformName}.platform/Developer/SDKs/${sdkLeafName}.sdk
     fi
     test -d "$SDKROOT" || { echo "ERROR: ${appleSdk} SDK not found" >&2; exit 1; }
     export SDKROOT
 
     CC_LAUNCH="$(command -v clang)"
     CXX_LAUNCH="$(command -v clang++)"
-${lib.optionalString isSimulator ''
+${lib.optionalString isCrossApple ''
     # The nixpkgs macOS stdenv clang *wrapper* re-injects -mmacos-version-min
     # internally (not on the visible argv), which clang refuses alongside
     # -mios-simulator-version-min — and there is no runtime env knob to unbake it.
@@ -181,23 +316,17 @@ ${lib.optionalString isSimulator ''
 
   installPhase = ''
     runHook preInstall
-    mkdir -p "$out/lib" "$out/lib/vulkan/icd.d"
-
-    icd=$(find build -type f -name 'libvk_swiftshader.dylib' -print -quit)
-    test -n "$icd" || {
-      echo "SwiftShader ${appleSdk} Vulkan ICD (libvk_swiftshader.dylib) was not produced" >&2
-      find build -name 'libvk_swiftshader*' -o -name '*.dylib' | head -50 >&2
-      exit 1
-    }
-    install -m755 "$icd" "$out/lib/libvk_swiftshader.dylib"
-
-    manifest=$(find build -type f -name 'vk_swiftshader_icd.json' -print -quit)
-    if [ -n "$manifest" ]; then
-      install -m644 "$manifest" "$out/lib/vulkan/icd.d/vk_swiftshader_icd.json"
-    fi
-    # Rewrite (or create) the ICD manifest so library_path is bundle-relative;
-    # the loader resolves it relative to the manifest's directory.
-    cat > "$out/lib/vulkan/icd.d/vk_swiftshader_icd.json" <<'EOF'
+    mkdir -p "$out/lib" "$out/nix-support"
+    ${lib.optionalString (!installStaticIcd) ''
+      mkdir -p "$out/lib/vulkan/icd.d"
+      icd=$(find build -type f -name 'libvk_swiftshader.dylib' -print -quit)
+      test -n "$icd" || {
+        echo "SwiftShader ${appleSdk} Vulkan ICD (libvk_swiftshader.dylib) was not produced" >&2
+        find build -name 'libvk_swiftshader*' -o -name '*.dylib' | head -50 >&2
+        exit 1
+      }
+      install -m755 "$icd" "$out/lib/libvk_swiftshader.dylib"
+      cat > "$out/lib/vulkan/icd.d/vk_swiftshader_icd.json" <<'EOF'
 {
   "file_format_version": "1.0.0",
   "ICD": {
@@ -206,11 +335,50 @@ ${lib.optionalString isSimulator ''
   }
 }
 EOF
+      echo dylib > "$out/nix-support/link-kind"
+    ''}
+    ${lib.optionalString installStaticIcd ''
+      set +e
+      LLVM_AR=$(command -v llvm-ar || true)
+      [ -n "$LLVM_AR" ] || LLVM_AR=$(command -v ar || true)
+      set -e
+      static_icd=$(find build -type f -name 'libvk_swiftshader.a' -print -quit || true)
+      if [ -n "$static_icd" ]; then
+        install -m644 "$static_icd" "$out/lib/libvk_swiftshader.a"
+      else
+        dylib=$(find build -type f -name 'libvk_swiftshader.dylib' -print -quit || true)
+        test -n "$dylib" || {
+          echo "SwiftShader ${appleSdk}: no static or shared ICD produced" >&2
+          find build -name 'libvk_swiftshader*' | head -20 >&2
+          exit 1
+        }
+        # Mach-O dylibs are not ar archives; materialize a static ICD with Apple libtool.
+        echo "SwiftShader ${appleSdk}: materializing static ICD via /usr/bin/libtool -static" >&2
+        /usr/bin/libtool -static -o "$out/lib/libvk_swiftshader.a" "$dylib" || {
+          echo "SwiftShader ${appleSdk}: libtool -static failed for $dylib" >&2
+          exit 1
+        }
+        test -s "$out/lib/libvk_swiftshader.a" || {
+          echo "SwiftShader ${appleSdk}: empty static ICD after libtool" >&2
+          exit 1
+        }
+      fi
+      echo static > "$out/nix-support/link-kind"
+      echo "Reactor backend: LLVM (Subzero lacks watchOS target; store go/no-go in watchos.nix)" \
+        > "$out/nix-support/swiftshader-watch-notes.txt"
+    ''}
     runHook postInstall
   '';
 
   meta = with lib; {
-    description = "SwiftShader software Vulkan ICD for ${if isSimulator then "the iOS Simulator" else "macOS"}";
+    description = "SwiftShader software Vulkan ICD for ${
+      if isWatch then
+        if appleSdk == "watchsimulator" then "watchOS Simulator" else "watchOS"
+      else if isSimulator then
+        "the iOS Simulator"
+      else
+        "macOS"
+    }";
     homepage = "https://swiftshader.googlesource.com/SwiftShader";
     license = licenses.asl20;
     platforms = platforms.darwin;
