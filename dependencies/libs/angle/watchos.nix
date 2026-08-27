@@ -170,19 +170,53 @@ PY
       "$TMPDIR/libEGL-materialized.a" "$EGL_ARCHIVE" | "$LLVM_AR" -M
     {
       printf 'CREATE %s\n' "$TMPDIR/libGLESv2-materialized.a"
-      find "$OUT_DIR" -type f -name '*.o' \
-        ! -path '*/libEGL_static/*' -print | LC_ALL=C sort |
-      while IFS= read -r object; do
-        printf 'ADDMOD %s/%s\n' "$PWD" "$object"
-      done
+      # Prefer the GN static archive when it is a real multi-member fat
+      # archive. Falling back to every .o pulls vkmock + vulkan-loader twice
+      # (duplicate vkCreate*Surface / PresentRectangles) and breaks watch link.
+      if "$LLVM_AR" t "$GLES_ARCHIVE" 2>/dev/null | awk 'END { exit !(NR > 1) }'; then
+        printf 'ADDLIB %s\n' "$GLES_ARCHIVE"
+      else
+        find "$OUT_DIR" -type f -name '*.o' \
+          ! -path '*/libEGL_static/*' \
+          ! -path '*/vkmock/*' \
+          ! -path '*/tests/*' \
+          ! -path '*/unittests/*' \
+          -print | LC_ALL=C sort |
+        while IFS= read -r object; do
+          printf 'ADDMOD %s/%s\n' "$PWD" "$object"
+        done
+      fi
       printf 'SAVE\nEND\n'
     } | "$LLVM_AR" -M
+    # Ensure null display symbols exist (needed when ADDLIB path is used).
+    if ! nm -g "$TMPDIR/libGLESv2-materialized.a" 2>/dev/null | grep -q IsVulkanNullDisplayAvailable; then
+      NULL_O=$(find "$OUT_DIR" -type f -name 'DisplayVkNull.o' -print | LC_ALL=C sort | awk 'NR==1{print;exit}')
+      if [ -n "$NULL_O" ]; then
+        "$LLVM_AR" r "$TMPDIR/libGLESv2-materialized.a" "$NULL_O"
+      fi
+    fi
     # Same as iOS: namespace ANGLE entry points so iland's EGL shim owns the
     # public symbols (shim calls angle_eglGetDisplay, etc.).
     ${pkgs.bash}/bin/bash ${./rename-angle-symbols.sh} \
       "$TMPDIR/libEGL-materialized.a" $out/lib/libEGL.a
     ${pkgs.bash}/bin/bash ${./rename-angle-symbols.sh} \
       "$TMPDIR/libGLESv2-materialized.a" $out/lib/libGLESv2.a
+    # Fail closed: no Mac Metal Vulkan display path in the Watch archive.
+    if nm -g $out/lib/libGLESv2.a 2>/dev/null | c++filt | grep -E 'CreateVulkanMacDisplay' >/dev/null; then
+      echo "ERROR: Watch ANGLE archive still contains CreateVulkanMacDisplay" >&2
+      nm -g $out/lib/libGLESv2.a | c++filt | grep CreateVulkanMacDisplay >&2 || true
+      exit 1
+    fi
+    if ! nm -g $out/lib/libGLESv2.a 2>/dev/null | c++filt | grep -q IsVulkanNullDisplayAvailable; then
+      echo "ERROR: Watch ANGLE archive missing DisplayVkNull" >&2
+      exit 1
+    fi
+    # Prefer a single definition of each vk* WSI entry (vkmock + loader = link fail).
+    dup=$(nm -g $out/lib/libGLESv2.a 2>/dev/null | awk '/ T _vkDestroySurfaceKHR$/ {c++} END {print c+0}')
+    if [ "$dup" -gt 1 ]; then
+      echo "ERROR: Watch ANGLE archive has $dup copies of vkDestroySurfaceKHR" >&2
+      exit 1
+    fi
     cp -r include/* "$out/include/" 2>/dev/null || true
     cp -r third_party/angle/include/* "$out/include/" 2>/dev/null || true
     echo static > "$out/nix-support/link-kind"
