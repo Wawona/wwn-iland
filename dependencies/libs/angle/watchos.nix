@@ -170,48 +170,41 @@ PY
       "$TMPDIR/libEGL-materialized.a" "$EGL_ARCHIVE" | "$LLVM_AR" -M
     {
       printf 'CREATE %s\n' "$TMPDIR/libGLESv2-materialized.a"
-      # Materialize backend .o files. libGLESv2_static is thin/incomplete for
-      # Watch Vulkan. vulkan-loader WSI entry points can appear in two objects
-      # (duplicate vkDestroySurfaceKHR etc.); keep the first by path order.
-      : > "$TMPDIR/angle-gles-objects.txt"
+      # Materialize backend .o files. Skip vulkan-tools mock ICD (duplicates
+      # vkDestroySurfaceKHR / PresentRectangles vs vulkan-loader).
       find "$OUT_DIR" -type f -name '*.o' \
         ! -path '*/libEGL_static/*' \
+        ! -path '*/VkICD_mock_icd/*' \
+        ! -path '*/vulkan-tools/*' \
         ! -path '*/tests/*' \
         ! -path '*/unittests/*' \
         ! -path '*/angle_end2end_tests/*' \
         ! -path '*/angle_white_box_tests/*' \
-        -print | LC_ALL=C sort > "$TMPDIR/angle-gles-all.txt"
-      seen_wsi=0
-      while IFS= read -r object; do
-        if nm -g "$object" 2>/dev/null | grep -q ' T _vkDestroySurfaceKHR$'; then
-          if [ "$seen_wsi" -eq 1 ]; then
-            echo "angle-watch: skipping duplicate WSI object $object" >&2
-            continue
-          fi
-          seen_wsi=1
-        fi
-        printf '%s\n' "$object" >> "$TMPDIR/angle-gles-objects.txt"
-      done < "$TMPDIR/angle-gles-all.txt"
+        -print | LC_ALL=C sort |
       while IFS= read -r object; do
         printf 'ADDMOD %s/%s\n' "$PWD" "$object"
-      done < "$TMPDIR/angle-gles-objects.txt"
+      done
       printf 'SAVE\nEND\n'
     } | "$LLVM_AR" -M
+    NULL_O=$(find "$OUT_DIR" -type f \( -name 'DisplayVkNull.o' -o -path '*/null/DisplayVkNull.o' \) -print | LC_ALL=C sort | awk 'NR==1{print;exit}')
+    if [ -z "$NULL_O" ]; then
+      echo "ERROR: DisplayVkNull.o not built (angle_use_vulkan_null_display?)" >&2
+      find "$OUT_DIR" -name '*Null*.o' -print | LC_ALL=C sort | head -n 40 >&2 || true
+      exit 1
+    fi
+    if ! nm -g "$TMPDIR/libGLESv2-materialized.a" 2>/dev/null | grep ' T ' | grep -q IsVulkanNullDisplayAvailable; then
+      echo "angle-watch: force-adding $NULL_O" >&2
+      "$LLVM_AR" r "$TMPDIR/libGLESv2-materialized.a" "$NULL_O"
+    fi
     # Same as iOS: namespace ANGLE entry points so iland's EGL shim owns the
     # public symbols (shim calls angle_eglGetDisplay, etc.).
     ${pkgs.bash}/bin/bash ${./rename-angle-symbols.sh} \
       "$TMPDIR/libEGL-materialized.a" $out/lib/libEGL.a
     ${pkgs.bash}/bin/bash ${./rename-angle-symbols.sh} \
       "$TMPDIR/libGLESv2-materialized.a" $out/lib/libGLESv2.a
-    # Fail closed: null Vulkan display present; Mac Metal display absent;
-    # vulkan-loader WSI symbols not duplicated (vkmock excluded above).
-    if ! "$LLVM_AR" t $out/lib/libGLESv2.a >/dev/null 2>&1; then
-      echo "ERROR: Watch ANGLE libGLESv2.a unreadable" >&2
-      exit 1
-    fi
-    if ! nm -g $out/lib/libGLESv2.a 2>/dev/null | grep -q IsVulkanNullDisplayAvailable; then
-      echo "ERROR: Watch ANGLE archive missing DisplayVkNull" >&2
-      nm -g $out/lib/libGLESv2.a 2>/dev/null | grep -i Null | head -n 20 >&2 || true
+    if ! nm -g $out/lib/libGLESv2.a 2>/dev/null | grep ' T ' | grep -q IsVulkanNullDisplayAvailable; then
+      echo "ERROR: Watch ANGLE archive missing defined DisplayVkNull" >&2
+      nm -g $out/lib/libGLESv2.a 2>/dev/null | grep -i NullDisplay | head -n 20 >&2 || true
       exit 1
     fi
     if nm -g $out/lib/libGLESv2.a 2>/dev/null | grep -q CreateVulkanMacDisplay; then
