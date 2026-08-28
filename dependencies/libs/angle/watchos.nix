@@ -192,7 +192,8 @@ PY
       find "$OUT_DIR" -name '*Null*.o' -print | LC_ALL=C sort | head -n 40 >&2 || true
       exit 1
     fi
-    if ! nm -g "$TMPDIR/libGLESv2-materialized.a" 2>/dev/null | grep ' T ' | grep -q IsVulkanNullDisplayAvailable; then
+    if ! nm -g "$TMPDIR/libGLESv2-materialized.a" 2>/dev/null |
+         grep -E '[[:space:]]T[[:space:]].*IsVulkanNullDisplayAvailable' >/dev/null; then
       echo "angle-watch: force-adding $NULL_O" >&2
       "$LLVM_AR" r "$TMPDIR/libGLESv2-materialized.a" "$NULL_O"
     fi
@@ -202,16 +203,18 @@ PY
       "$TMPDIR/libEGL-materialized.a" $out/lib/libEGL.a
     ${pkgs.bash}/bin/bash ${./rename-angle-symbols.sh} \
       "$TMPDIR/libGLESv2-materialized.a" $out/lib/libGLESv2.a
-    if ! nm -g $out/lib/libGLESv2.a 2>/dev/null | grep ' T ' | grep -q IsVulkanNullDisplayAvailable; then
+    # Single grep (not grep|grep -q): pipefail + early -q exit is a false fail.
+    if ! nm -g $out/lib/libGLESv2.a 2>/dev/null |
+         grep -E '[[:space:]]T[[:space:]].*IsVulkanNullDisplayAvailable' >/dev/null; then
       echo "ERROR: Watch ANGLE archive missing defined DisplayVkNull" >&2
       nm -g $out/lib/libGLESv2.a 2>/dev/null | grep -i NullDisplay | head -n 20 >&2 || true
       exit 1
     fi
-    if nm -g $out/lib/libGLESv2.a 2>/dev/null | grep -q CreateVulkanMacDisplay; then
+    if nm -g $out/lib/libGLESv2.a 2>/dev/null | grep CreateVulkanMacDisplay >/dev/null; then
       echo "ERROR: Watch ANGLE archive still contains CreateVulkanMacDisplay" >&2
       exit 1
     fi
-    dup=$(nm -g $out/lib/libGLESv2.a 2>/dev/null | awk '/ T _vkDestroySurfaceKHR$/ {c++} END {print c+0}')
+    dup=$(nm -g $out/lib/libGLESv2.a 2>/dev/null | awk '/[[:space:]]T[[:space:]]_vkDestroySurfaceKHR$/ {c++} END {print c+0}')
     if [ "$dup" -gt 1 ]; then
       echo "ERROR: Watch ANGLE archive has $dup copies of vkDestroySurfaceKHR" >&2
       exit 1
