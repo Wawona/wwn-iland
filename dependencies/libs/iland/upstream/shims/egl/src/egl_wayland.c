@@ -21,6 +21,7 @@
 #ifdef ILAND_WATCH_SHM_WINSYS
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <time.h>
 #endif
 
 #include <wayland-client.h>
@@ -513,6 +514,43 @@ int iland_wl_swapchain_present_pixels(IlandWlSwapchain *sc, const void *pixels,
     if (!sc || !pixels || stride_bytes == 0)
         return -1;
 
+#ifdef ILAND_WATCH_SHM_WINSYS
+    /* Watch SpriteView is 30 fps. vkcube's Wayland path does not wait on
+     * wl_surface.frame or DRM page-flip; without a present cadence it advances
+     * many animation steps per wall-clock second. Sleep on the client thread
+     * (same idea as deferring iland_drm_complete_page_flip on the KMS path). */
+    {
+        static struct timespec s_next = {0, 0};
+        const long period_ns = 1000000000L / 30;
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+            if (s_next.tv_sec != 0 || s_next.tv_nsec != 0) {
+                while (now.tv_sec < s_next.tv_sec ||
+                       (now.tv_sec == s_next.tv_sec &&
+                        now.tv_nsec < s_next.tv_nsec)) {
+                    struct timespec rem = {
+                        .tv_sec = s_next.tv_sec - now.tv_sec,
+                        .tv_nsec = s_next.tv_nsec - now.tv_nsec,
+                    };
+                    if (rem.tv_nsec < 0) {
+                        rem.tv_sec -= 1;
+                        rem.tv_nsec += 1000000000L;
+                    }
+                    nanosleep(&rem, NULL);
+                    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+                        break;
+                }
+            }
+            s_next = now;
+            s_next.tv_nsec += period_ns;
+            if (s_next.tv_nsec >= 1000000000L) {
+                s_next.tv_sec += 1;
+                s_next.tv_nsec -= 1000000000L;
+            }
+        }
+    }
+#endif
+
     int slot = iland_wl_swapchain_acquire(sc);
     if (slot < 0)
         return -1;
@@ -528,9 +566,21 @@ int iland_wl_swapchain_present_pixels(IlandWlSwapchain *sc, const void *pixels,
 
     const uint8_t *src = (const uint8_t *)pixels;
     uint8_t *dst = (uint8_t *)s->shm_map;
-    for (uint32_t y = 0; y < sc->height; y++) {
-        memcpy(dst + (size_t)y * row_bytes,
-               src + (size_t)y * stride_bytes, row_bytes);
+    /* Watch mini compositor has no dmabuf Y_INVERT / WWNBottomUp bake.
+     * GLES swapchains are BOTTOM_UP (glReadPixels / ANGLE); flip here so
+     * SpriteKit sees top-down. Vulkan staging is TOP_DOWN and must not flip
+     * (that was the vkcube-correct / opengl-cube-inside-out split). */
+    if (sc->orientation == ILAND_WL_SWAPCHAIN_BOTTOM_UP) {
+        for (uint32_t y = 0; y < sc->height; y++) {
+            memcpy(dst + (size_t)y * row_bytes,
+                   src + (size_t)(sc->height - 1u - y) * stride_bytes,
+                   row_bytes);
+        }
+    } else {
+        for (uint32_t y = 0; y < sc->height; y++) {
+            memcpy(dst + (size_t)y * row_bytes,
+                   src + (size_t)y * stride_bytes, row_bytes);
+        }
     }
 #else
     IOSurfaceRef io = s->info.surface;

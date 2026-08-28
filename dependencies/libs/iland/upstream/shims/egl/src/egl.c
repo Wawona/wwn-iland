@@ -2166,6 +2166,11 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
             }
 
             g_glReadPixels(0, 0, (int)w, (int)h, 0x1908, 0x1401, g_pixels);
+            /* Watch _deliverPixelsCopy expects BGRA (ARGB8888 LE), same as
+             * Vulkan B8G8R8A8 and the GBM IOSurface copy path. glReadPixels
+             * is RGBA; permute before SHM present. Y-flip is in
+             * present_pixels when the swapchain is BOTTOM_UP. */
+            swap_rgba_to_bgra((uint8_t *)g_pixels, w, h, (size_t)w * 4);
 
             EGLBoolean ret =
                 real_eglSwapBuffers(sd->angle_display, ss->angle_surface);
