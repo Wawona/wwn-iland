@@ -1148,19 +1148,51 @@ typedef struct EGLShimImage {
     IOSurfaceRef    io;        /* +1 ref held from IOSurfaceLookup */
     EGLSurface      pbuffer;   /* Apple: ANGLE IOSurface-client-buffer pbuffer */
     EGLImageKHR     angle_image; /* Android: real ANGLE EGLImage from AHB */
-#if defined(__ANDROID__)
-    /* CPU-readback fallback (#140): the emulator's ANGLE runs on SwiftShader
-     * software Vulkan, which lacks VK_ANDROID_external_memory_android_hardware_
-     * buffer, so the AHB cannot be a GPU render target. The client then renders
-     * into a plain GL texture (given storage in glEGLImageTargetTexture2DOES),
-     * and drmModePageFlip copies that texture into the scanout AHB by CPU. */
-    int             cpu_fallback;  /* AHB import failed; readback on present */
-    unsigned int    client_tex;    /* client texture bound in the target call */
-    uint32_t        surface_id;    /* IOSurfaceGetID key for the present hook */
+#if defined(__ANDROID__) || defined(__APPLE__)
+    /* CPU-readback fallback (#140 / watch SwiftShader): when IOSurface/AHB
+     * import cannot be a GPU render target, the client renders into a plain GL
+     * texture and drmModePageFlip copies it into the scanout buffer by CPU. */
+    int             cpu_fallback;
+    unsigned int    client_tex;
+    uint32_t        surface_id;
     int             width, height;
-    struct EGLShimImage *reg_next; /* CPU-fallback registry linkage */
+    struct EGLShimImage *reg_next;
 #endif
 } EGLShimImage;
+
+#if defined(__ANDROID__) || defined(__APPLE__)
+/* GL enums used by the CPU-readback fallback. */
+#define WWN_AHBFB_TEXTURE_2D          0x0DE1
+#define WWN_AHBFB_TEXTURE_BINDING_2D  0x8069
+#define WWN_AHBFB_RGBA                0x1908
+#define WWN_AHBFB_UNSIGNED_BYTE       0x1401
+#define WWN_AHBFB_FRAMEBUFFER         0x8D40
+#define WWN_AHBFB_FRAMEBUFFER_BINDING 0x8CA6
+#define WWN_AHBFB_COLOR_ATTACHMENT0   0x8CE0
+
+static pthread_mutex_t g_cpu_fb_lock = PTHREAD_MUTEX_INITIALIZER;
+static EGLShimImage   *g_cpu_fb_images = NULL;
+static unsigned int    g_cpu_fb_readfbo = 0;
+
+static void cpu_fallback_register(EGLShimImage *img)
+{
+    pthread_mutex_lock(&g_cpu_fb_lock);
+    img->reg_next = g_cpu_fb_images;
+    g_cpu_fb_images = img;
+    pthread_mutex_unlock(&g_cpu_fb_lock);
+}
+
+static void cpu_fallback_unregister(EGLShimImage *img)
+{
+    pthread_mutex_lock(&g_cpu_fb_lock);
+    EGLShimImage **pp = &g_cpu_fb_images;
+    while (*pp) {
+        if (*pp == img) { *pp = img->reg_next; break; }
+        pp = &(*pp)->reg_next;
+    }
+    pthread_mutex_unlock(&g_cpu_fb_lock);
+}
+#endif
 
 #if defined(__ANDROID__)
 /*
@@ -1212,44 +1244,7 @@ static int android_ahb_import_load(void)
                : -1;
 }
 
-/* GL enums used by the CPU-readback fallback. Named to avoid clashing with the
- * WWN_GL_* set defined further down (past the EGLImage functions). */
-#define WWN_AHBFB_TEXTURE_2D          0x0DE1
-#define WWN_AHBFB_TEXTURE_BINDING_2D  0x8069
-#define WWN_AHBFB_RGBA                0x1908
-#define WWN_AHBFB_UNSIGNED_BYTE       0x1401
-#define WWN_AHBFB_FRAMEBUFFER         0x8D40
-#define WWN_AHBFB_FRAMEBUFFER_BINDING 0x8CA6
-#define WWN_AHBFB_COLOR_ATTACHMENT0   0x8CE0
-
-/* Registry of CPU-fallback images keyed by scanout IOSurface id. The DRM
- * page-flip path (drm_linux.c) calls iland_egl_flush_scanout_if_pending() with
- * the id of the buffer being scanned out; we look the image up here and copy
- * its client texture into the AHB. Both the client's GL work and the flip run
- * on the same client thread, so the client's GL context is current at flush. */
-static pthread_mutex_t g_cpu_fb_lock = PTHREAD_MUTEX_INITIALIZER;
-static EGLShimImage   *g_cpu_fb_images = NULL;
-static unsigned int    g_cpu_fb_readfbo = 0; /* lazily created readback FBO */
-
-static void cpu_fallback_register(EGLShimImage *img)
-{
-    pthread_mutex_lock(&g_cpu_fb_lock);
-    img->reg_next = g_cpu_fb_images;
-    g_cpu_fb_images = img;
-    pthread_mutex_unlock(&g_cpu_fb_lock);
-}
-
-static void cpu_fallback_unregister(EGLShimImage *img)
-{
-    pthread_mutex_lock(&g_cpu_fb_lock);
-    EGLShimImage **pp = &g_cpu_fb_images;
-    while (*pp) {
-        if (*pp == img) { *pp = img->reg_next; break; }
-        pp = &(*pp)->reg_next;
-    }
-    pthread_mutex_unlock(&g_cpu_fb_lock);
-}
-#endif
+#endif /* __ANDROID__ ahb import helpers */
 
 /* An IOSurface-bindable, texture-renderable config. ANGLE's default display is
  * process-wide, so cache the first match. */
@@ -1417,11 +1412,30 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
         sd->angle_display, EGL_IOSURFACE_ANGLE, (EGLClientBuffer)io, config,
         pb_attribs);
     if (pb == EGL_NO_SURFACE) {
-        fprintf(stderr,
-                "iland: eglCreateImageKHR: IOSurface pbuffer failed (0x%04x)\n",
-                real_eglGetError ? real_eglGetError() : 0);
-        CFRelease(io);
-        return EGL_NO_IMAGE_KHR;
+        /* SwiftShader ANGLE on watchOS may lack IOSurface client-buffer
+         * pbuffers. Fall back to CPU readback on page flip (Android #140). */
+        EGLShimImage *fb = calloc(1, sizeof(*fb));
+        if (!fb) {
+            CFRelease(io);
+            return EGL_NO_IMAGE_KHR;
+        }
+        fb->sd = sd;
+        fb->io = io;
+        fb->pbuffer = EGL_NO_SURFACE;
+        fb->cpu_fallback = 1;
+        fb->surface_id = surface_id;
+        fb->width  = width  > 0 ? width  : (int)IOSurfaceGetWidth(io);
+        fb->height = height > 0 ? height : (int)IOSurfaceGetHeight(io);
+        cpu_fallback_register(fb);
+        static int warned = 0;
+        if (!warned) {
+            warned = 1;
+            fprintf(stderr,
+                    "iland: IOSurface pbuffer import unavailable (0x%04x); "
+                    "using CPU readback for gbm-es2\n",
+                    real_eglGetError ? real_eglGetError() : 0);
+        }
+        return (EGLImageKHR)fb;
     }
 
     EGLShimImage *img = calloc(1, sizeof(*img));
@@ -1448,6 +1462,9 @@ EGLBoolean eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
         cpu_fallback_unregister(img);
     if (img->sd && img->angle_image && g_real_eglDestroyImageKHR)
         g_real_eglDestroyImageKHR(img->sd->angle_display, img->angle_image);
+#elif defined(__APPLE__)
+    if (img->cpu_fallback)
+        cpu_fallback_unregister(img);
 #endif
     if (img->sd && img->pbuffer && img->pbuffer != EGL_NO_SURFACE) {
         if (real_eglReleaseTexImage)
@@ -1478,10 +1495,9 @@ void glEGLImageTargetTexture2DOES(unsigned int target, void *image)
         g_real_glEGLImageTargetTexture2DOES(target, img->angle_image);
         return;
     }
-    /* CPU-readback fallback (#140): no dmabuf alias is possible, so give the
-     * client's currently bound texture real RGBA8 storage and remember its id.
-     * The client attaches it to an FBO and renders; drmModePageFlip reads it
-     * back into the scanout AHB. */
+#endif
+#if defined(__ANDROID__) || defined(__APPLE__)
+    /* CPU-readback fallback: give the client's bound texture RGBA8 storage. */
     if (img->cpu_fallback && g_glTexImage2D && g_glGetIntegerv) {
         int bound = 0;
         g_glGetIntegerv(WWN_AHBFB_TEXTURE_BINDING_2D, &bound);
@@ -1512,7 +1528,7 @@ void glEGLImageTargetTexture2DOES(unsigned int target, void *image)
 #define WWN_GL_SCISSOR_TEST              0x0C11
 #define WWN_GL_BLEND                     0x0BE2
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__APPLE__)
 /* Called from the DRM page-flip path (drm_linux.c) just before the buffer is
  * presented. If the scanout IOSurface is backed by a CPU-fallback EGLImage
  * (#140: AHB native-buffer import unavailable on the software-GPU emulator),

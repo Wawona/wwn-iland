@@ -37,6 +37,6 @@ import ./macos.nix (
       "-DBUILD_SHARED_LIBS=OFF"
     ];
     watchOsBuild = true;
-    installStaticIcd = true;
+    installStaticIcd = false;
   }
 )
