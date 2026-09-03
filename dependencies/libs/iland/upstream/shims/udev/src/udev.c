@@ -5,6 +5,9 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/types.h>
+#if defined(__linux__) || defined(__ANDROID__)
+#include <sys/sysmacros.h>
+#endif
 
 static struct udev g_dev;
 static struct udev_device g_devnode_dev;
