@@ -10,10 +10,7 @@
 
 typedef void *IOMobileFramebufferRef;
 typedef int32_t IOMobileFramebufferReturn;
-typedef struct {
-    uint32_t width;
-    uint32_t height;
-} IOMobileFramebufferDisplaySize;
+typedef CGSize IOMobileFramebufferDisplaySize;
 
 typedef IOMobileFramebufferReturn (*FnGetMain)(IOMobileFramebufferRef *);
 typedef IOMobileFramebufferReturn (*FnGetSecondary)(IOMobileFramebufferRef *);
@@ -158,16 +155,18 @@ void *wwn_iomfb_platform_open(
         write_error(error, error_capacity, @"IOMobileFramebuffer size unavailable");
         return NULL;
     }
+    uint32_t width = (uint32_t)size.width;
+    uint32_t height = (uint32_t)size.height;
 
     WWNIOMFBPlatformSession *session = [WWNIOMFBPlatformSession new];
     session->display = display;
-    session->width = size.width;
-    session->height = size.height;
+    session->width = width;
+    session->height = height;
     session->swapBegin = swapBegin;
     session->swapEnd = swapEnd;
     session->swapSetLayer = swapSetLayer;
-    session->surfaces[0] = make_surface(size.width, size.height);
-    session->surfaces[1] = make_surface(size.width, size.height);
+    session->surfaces[0] = make_surface(width, height);
+    session->surfaces[1] = make_surface(width, height);
     if (!session->surfaces[0] || !session->surfaces[1]) {
         write_error(error, error_capacity, @"IOMFB IOSurface allocation failed");
         return NULL;
@@ -180,8 +179,8 @@ void *wwn_iomfb_platform_open(
             MTLTextureDescriptor *descriptor =
                 [MTLTextureDescriptor
                     texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                 width:size.width
-                                                height:size.height
+                                                 width:width
+                                                height:height
                                              mipmapped:NO];
             descriptor.storageMode = MTLStorageModeShared;
             descriptor.usage =
@@ -192,12 +191,12 @@ void *wwn_iomfb_platform_open(
                                                     plane:0];
         }
     }
-    *out_width = size.width;
-    *out_height = size.height;
+    *out_width = width;
+    *out_height = height;
     os_log(OS_LOG_DEFAULT,
            "wwn.iomfb op=open result=ok width=%{public}u height=%{public}u "
            "metal=%{public}d",
-           size.width, size.height, session->device != nil);
+           width, height, session->device != nil);
     return (__bridge_retained void *)session;
 }
 
