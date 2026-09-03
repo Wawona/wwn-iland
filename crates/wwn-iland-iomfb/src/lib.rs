@@ -6,11 +6,17 @@
 
 use std::ffi::{c_char, c_void};
 use std::ptr;
+use std::sync::{Mutex, OnceLock};
 
 const WWN_IOMFB_OK: i32 = 0;
 const WWN_IOMFB_INVALID: i32 = -1;
 const WWN_IOMFB_PLATFORM: i32 = -2;
 const WWN_IOMFB_STATE: i32 = -3;
+
+fn last_open_error() -> &'static Mutex<[i8; 192]> {
+    static ERROR: OnceLock<Mutex<[i8; 192]>> = OnceLock::new();
+    ERROR.get_or_init(|| Mutex::new([0; 192]))
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -129,8 +135,15 @@ pub unsafe extern "C" fn wwn_iomfb_open(out_session: *mut *mut c_void) -> i32 {
     let platform =
         wwn_iomfb_platform_open(&mut width, &mut height, error.as_mut_ptr(), error.len());
     if platform.is_null() || width == 0 || height == 0 {
+        *last_open_error()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = error;
         return WWN_IOMFB_PLATFORM;
     }
+    last_open_error()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .fill(0);
     let session = Box::new(Session {
         platform,
         width,
@@ -247,10 +260,14 @@ pub unsafe extern "C" fn wwn_iomfb_restore(opaque: *mut c_void) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn wwn_iomfb_last_error(opaque: *mut c_void) -> *const c_char {
-    let Some(session) = opaque.cast::<Session>().as_ref() else {
-        return ptr::null();
-    };
-    session.last_error.as_ptr().cast()
+    if let Some(session) = opaque.cast::<Session>().as_ref() {
+        return session.last_error.as_ptr().cast();
+    }
+    last_open_error()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ptr()
+        .cast()
 }
 
 #[no_mangle]
