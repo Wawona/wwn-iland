@@ -122,6 +122,12 @@
         iland-baremetal = withPlatformVariants {
           macos = ./dependencies/libs/iland/macos-baremetal.nix;
         };
+        # L1 iOS own-display sink. Cited: Wawona/docs/wwn-repo-dag.md.
+        # Mode B device products opt in explicitly; no store/mobile default.
+        iland-iomfb = withPlatformVariants {
+          ios = ./dependencies/libs/iland/iomfb.nix;
+          ipados = ./dependencies/libs/iland/iomfb.nix;
+        };
       };
 
       packages = forAll (system:
@@ -149,6 +155,7 @@
           iland-visionos-sim = tc.buildForVisionOS "iland" { simulator = true; };
           iland-macos = tc.buildForMacOS "iland" { };
           iland-baremetal-macos = tc.buildForMacOS "iland-baremetal" { };
+          iland-iomfb-ios = tc.buildForIOS "iland-iomfb" { };
           angle-ios = tc.buildForIOS "angle" { };
           angle-ios-sim = tc.buildForIOS "angle" { simulator = true; };
           angle-visionos = tc.buildForVisionOS "angle" { };

@@ -1,0 +1,14 @@
+[package]
+name = "wwn-iland-iomfb"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust-owned Wawona iOS Mode B IOMobileFramebuffer display sink"
+
+[lib]
+crate-type = ["staticlib"]
+
+[profile.release]
+lto = false
+panic = "abort"
+strip = "debuginfo"
