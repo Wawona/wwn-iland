@@ -417,6 +417,7 @@ typedef struct _drmModeAtomicReq drmModeAtomicReq;
 
 drmModeAtomicReq *drmModeAtomicAlloc(void);
 void              drmModeAtomicFree(drmModeAtomicReq *req);
+void              drmModeAtomicReset(drmModeAtomicReq *req);
 int               drmModeAtomicAddProperty(drmModeAtomicReq *req, uint32_t object_id, uint32_t property_id, uint64_t value);
 int               drmModeAtomicCommit(int fd, drmModeAtomicReq *req, uint32_t flags, void *user_data);
 

@@ -416,6 +416,7 @@ static int handle_atomic(void *arg)
             pool_in_use |= (1u << i);
             if (!pool[i]) pool[i] = drmModeAtomicAlloc();
             req = pool[i];
+            drmModeAtomicReset(req);
             break;
         }
     }

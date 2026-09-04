@@ -924,7 +924,7 @@ static IOSurfaceRef fb_id_to_surface(uint32_t fb_id)
     return NULL;
 }
 
-/* True when this FB is a CPU-mapped dumb BO (fbcon / igettyd), not GBM. */
+/* True when this FB is a CPU-mapped dumb BO (fbcon / igettyd / pixman), not GBM. */
 static int fb_is_dumb(uint32_t fb_id)
 {
     IOSurfaceRef surf = fb_id_to_surface(fb_id);
@@ -935,6 +935,26 @@ static int fb_is_dumb(uint32_t fb_id)
             return 1;
     }
     return 0;
+}
+
+/* Weston --use-pixman and fbcon write the malloc shadow. GBM/GL writes the
+ * IOSurface itself. Copy under lock before any present path (legacy page
+ * flip or atomic FB_ID). Without this, atomic commits scan out an empty
+ * surface and IOMFB stays black. */
+static void flush_dumb_fb_to_surface(uint32_t fb_id, IOSurfaceRef surf)
+{
+    if (!surf || !fb_is_dumb(fb_id))
+        return;
+    for (int i = 0; i < MAX_DUMB_BUFS; i++) {
+        if (!g_dumb[i].handle || g_dumb[i].surface != surf)
+            continue;
+        IOSurfaceLock(surf, 0, NULL);
+        void *dst = IOSurfaceGetBaseAddress(surf);
+        if (dst && g_dumb[i].map && dst != g_dumb[i].map)
+            memcpy(dst, g_dumb[i].map, g_dumb[i].size);
+        IOSurfaceUnlock(surf, 0, NULL);
+        return;
+    }
 }
 
 /* ── mode set + page flip ─────────────────────────────────────────────── */
@@ -968,21 +988,7 @@ int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
     g_state.crtc_fb_id = fb_id;
 
     IOSurfaceRef surf = fb_id_to_surface(fb_id);
-
-    /* CPU raster writes the malloc shadow. Copy into the IOSurface under
-     * lock so CoreDisplay sees new cells. Do not do this for GBM scanout. */
-    if (surf && fb_is_dumb(fb_id)) {
-        for (int i = 0; i < MAX_DUMB_BUFS; i++) {
-            if (!g_dumb[i].handle || g_dumb[i].surface != surf)
-                continue;
-            IOSurfaceLock(surf, 0, NULL);
-            void *dst = IOSurfaceGetBaseAddress(surf);
-            if (dst && g_dumb[i].map && dst != g_dumb[i].map)
-                memcpy(dst, g_dumb[i].map, g_dumb[i].size);
-            IOSurfaceUnlock(surf, 0, NULL);
-            break;
-        }
-    }
+    flush_dumb_fb_to_surface(fb_id, surf);
 
 #if defined(__ANDROID__)
     /* #140: if this scanout buffer is backed by a CPU-fallback EGLImage (the
@@ -1732,6 +1738,12 @@ void drmModeAtomicFree(drmModeAtomicReq *req)
     free(req);
 }
 
+void drmModeAtomicReset(drmModeAtomicReq *req)
+{
+    if (req)
+        req->prop_count = 0;
+}
+
 int drmModeAtomicAddProperty(drmModeAtomicReq *req,
     uint32_t object_id, uint32_t property_id, uint64_t value)
 {
@@ -1794,7 +1806,9 @@ int drmModeAtomicCommit(int fd, drmModeAtomicReq *req,
         if (prop_id == g_cached_prop_ids.fb_id) {
             bool is_cursor = (obj_id == 2);
             IOSurfaceRef surf = fb_id_to_surface((uint32_t)val);
-            if (surf) {
+            if (surf && (flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0)
+                flush_dumb_fb_to_surface((uint32_t)val, surf);
+            if (surf && (flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0) {
                 if ((!is_cursor && g_present_cb) ||
                     (is_cursor && g_cursor_cb)) {
                     /* Mode A — present in-window, in-process. */
