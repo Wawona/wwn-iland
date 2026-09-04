@@ -17,6 +17,7 @@
 #include <string.h>
 #include <mach/mach.h>
 #include <sys/time.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 /* ── dynamic mode table (reads display resolution from plist) ────────── */
@@ -707,6 +708,35 @@ int drmModeDestroyDumbBuffer(int fd, uint32_t handle)
     }
     errno = ENOENT;
     return -1;
+}
+
+void *iland_drm_mmap(void *addr, size_t length, int prot, int flags, int fd,
+                     off_t offset)
+{
+    if (fd == DRM_VIRTUAL_FD) {
+        void *p = (void *)(uintptr_t)offset;
+        for (int i = 0; i < MAX_DUMB_BUFS; i++) {
+            if (g_dumb[i].handle != 0 && g_dumb[i].map == p) {
+                (void)addr;
+                (void)length;
+                (void)prot;
+                (void)flags;
+                return p;
+            }
+        }
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+    return mmap(addr, length, prot, flags, fd, offset);
+}
+
+int iland_drm_munmap(void *addr, size_t length)
+{
+    for (int i = 0; i < MAX_DUMB_BUFS; i++) {
+        if (g_dumb[i].handle != 0 && g_dumb[i].map == addr)
+            return 0;
+    }
+    return munmap(addr, length);
 }
 
 int drmModeMapDumbBuffer(int fd, uint32_t handle, uint64_t *offset)

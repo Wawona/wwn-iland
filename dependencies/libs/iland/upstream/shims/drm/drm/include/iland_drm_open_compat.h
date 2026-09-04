@@ -21,6 +21,8 @@
  * later #include <fcntl.h> (include-guarded) does not see the macro and mangle
  * the prototype. */
 #include <fcntl.h>
+#include <stddef.h>
+#include <sys/mman.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,6 +36,16 @@ extern "C" {
  */
 int iland_drm_open_card(const char *path, int flags, ...);
 
+/*
+ * Weston drm_fb_create_dumb mmap's the card fd after MAP_DUMB. The virtual
+ * fd is a pipe (select/poll), so libc mmap fails and pixman init returns -1
+ * ("Failed to init output pixman state"). MAP_DUMB's offset is already the
+ * CPU pointer from drmModeCreateDumbBuffer. Return that pointer instead.
+ */
+void *iland_drm_mmap(void *addr, size_t length, int prot, int flags, int fd,
+                     off_t offset);
+int iland_drm_munmap(void *addr, size_t length);
+
 #ifdef __cplusplus
 }
 #endif
@@ -41,5 +53,7 @@ int iland_drm_open_card(const char *path, int flags, ...);
 /* Redirect open() at the call sites in force-included client sources. Variadic
  * so both open(path, flags) and open(path, flags, mode) compile unchanged. */
 #define open(...) iland_drm_open_card(__VA_ARGS__)
+#define mmap(...) iland_drm_mmap(__VA_ARGS__)
+#define munmap(...) iland_drm_munmap(__VA_ARGS__)
 
 #endif /* ILAND_DRM_OPEN_COMPAT_H */
