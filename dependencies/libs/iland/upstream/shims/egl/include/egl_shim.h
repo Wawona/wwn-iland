@@ -2,7 +2,12 @@
 #define EGL_SHIM_H
 
 #include <gbm.h>
+#include <stdint.h>
 #include <EGL/egl.h>
+
+/* Distinguishes an iland wrapper from a raw ANGLE EGLDisplay. unwrap must
+ * not treat an ANGLE handle as a shim (that is EGL_BAD_DISPLAY). */
+#define ILAND_EGL_DISPLAY_MAGIC 0x494C4E44u
 
 /* Wayland winsys types stay opaque here; see shims/egl/include/iland_wl_winsys.h. */
 struct wl_display;
@@ -22,6 +27,7 @@ typedef enum EGLShimDisplayKind {
 } EGLShimDisplayKind;
 
 typedef struct EGLShimDisplay {
+    uint32_t magic;
     EGLDisplay angle_display;
     struct gbm_device *gbm_device;
 

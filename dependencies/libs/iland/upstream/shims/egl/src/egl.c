@@ -651,7 +651,53 @@ static void load_gles2(void)
 
 static EGLShimDisplay *unwrap_display(EGLDisplay dpy)
 {
-    return (EGLShimDisplay *)dpy;
+    EGLShimDisplay *sd = (EGLShimDisplay *)dpy;
+    if (!sd || sd->magic != ILAND_EGL_DISPLAY_MAGIC)
+        return NULL;
+    return sd;
+}
+
+#ifndef EGL_PLATFORM_ANGLE_ANGLE
+#define EGL_PLATFORM_ANGLE_ANGLE 0x3202
+#endif
+#ifndef EGL_PLATFORM_ANGLE_TYPE_ANGLE
+#define EGL_PLATFORM_ANGLE_TYPE_ANGLE 0x3203
+#endif
+#ifndef EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE
+#define EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE 0x3489
+#endif
+
+/* ANGLE on Apple often returns NULL from eglGetDisplay(DEFAULT). Ask for
+ * the Metal platform display instead. Never hand out a wrapper whose
+ * angle_display is NULL: eglInitialize then reports EGL_BAD_DISPLAY. */
+static EGLDisplay angle_default_display(void)
+{
+    EGLDisplay d = real_eglGetDisplay
+        ? real_eglGetDisplay(EGL_DEFAULT_DISPLAY)
+        : EGL_NO_DISPLAY;
+    if (d)
+        return d;
+    if (!real_eglGetProcAddress)
+        return EGL_NO_DISPLAY;
+    typedef EGLDisplay (*get_platform_fn)(EGLenum, void *, const EGLAttrib *);
+    get_platform_fn getplat = (get_platform_fn)real_eglGetProcAddress(
+        "eglGetPlatformDisplay");
+    if (!getplat)
+        getplat = (get_platform_fn)real_eglGetProcAddress(
+            "eglGetPlatformDisplayEXT");
+    if (!getplat)
+        return EGL_NO_DISPLAY;
+    const EGLAttrib attribs[] = {
+        (EGLAttrib)EGL_PLATFORM_ANGLE_TYPE_ANGLE,
+        (EGLAttrib)EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
+        (EGLAttrib)EGL_NONE,
+    };
+    d = getplat(EGL_PLATFORM_ANGLE_ANGLE, (void *)EGL_DEFAULT_DISPLAY, attribs);
+    if (!d) {
+        fprintf(stderr,
+                "iland: ANGLE DEFAULT and Metal platform displays are NULL\n");
+    }
+    return d;
 }
 
 static EGLShimSurface *unwrap_surface(EGLSurface surf)
@@ -689,9 +735,14 @@ EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id)
     EGLShimDisplay *dpy = calloc(1, sizeof(*dpy));
     if (!dpy) return EGL_NO_DISPLAY;
 
+    dpy->magic = ILAND_EGL_DISPLAY_MAGIC;
     dpy->kind = EGL_SHIM_DISPLAY_GBM;
     dpy->gbm_device = (struct gbm_device *)display_id;
-    dpy->angle_display = real_eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    dpy->angle_display = angle_default_display();
+    if (!dpy->angle_display) {
+        free(dpy);
+        return EGL_NO_DISPLAY;
+    }
 
     return (EGLDisplay)dpy;
 }
@@ -714,12 +765,18 @@ static EGLDisplay shim_get_platform_display(EGLenum platform, void *native)
 
     /* Apple EGLNativeDisplayType is int; never funnel a gbm_device* through
      * eglGetDisplay or the pointer is truncated. */
-    if (platform == EGL_PLATFORM_GBM_KHR) {
+    if (platform == EGL_PLATFORM_GBM_KHR ||
+        platform == EGL_PLATFORM_ANGLE_ANGLE) {
         EGLShimDisplay *dpy = calloc(1, sizeof(*dpy));
         if (!dpy) return EGL_NO_DISPLAY;
+        dpy->magic = ILAND_EGL_DISPLAY_MAGIC;
         dpy->kind = EGL_SHIM_DISPLAY_GBM;
         dpy->gbm_device = (struct gbm_device *)native;
-        dpy->angle_display = real_eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        dpy->angle_display = angle_default_display();
+        if (!dpy->angle_display) {
+            free(dpy);
+            return EGL_NO_DISPLAY;
+        }
         return (EGLDisplay)dpy;
     }
 
@@ -735,9 +792,14 @@ static EGLDisplay shim_get_platform_display(EGLenum platform, void *native)
     EGLShimDisplay *dpy = calloc(1, sizeof(*dpy));
     if (!dpy) return EGL_NO_DISPLAY;
 
+    dpy->magic = ILAND_EGL_DISPLAY_MAGIC;
     dpy->kind = EGL_SHIM_DISPLAY_WAYLAND;
     dpy->wl_display = (struct wl_display *)native;
-    dpy->angle_display = real_eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    dpy->angle_display = angle_default_display();
+    if (!dpy->angle_display) {
+        free(dpy);
+        return EGL_NO_DISPLAY;
+    }
 
     return (EGLDisplay)dpy;
 #else
