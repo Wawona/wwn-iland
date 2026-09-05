@@ -91,10 +91,10 @@ void iland_drm_set_preferred_mode(uint32_t w, uint32_t h,
                                   uint32_t refresh_millihz);
 
 /*
- * Ensure DRM_VIRTUAL_FD (42) is a real pipe readable by select/poll, and set
- * g_drm_event_pipe_write so page-flip events can wake kmscube / nested DRM
- * clients. Required for in-process Mode A on Apple mobile (no Dobby
- * wayland-mac constructor). Idempotent; returns 0 on success.
+ * Create the page-flip event pipe and keep a durable read end. Client
+ * drmOpen / iland_drm_open_card return a dup so close() cannot destroy the
+ * only reader. DRM_VIRTUAL_FD (42) is also a dup for legacy pollers.
+ * Idempotent; returns 0 on success.
  */
 int iland_drm_prepare_virtual_fd(void);
 

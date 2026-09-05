@@ -225,24 +225,52 @@ static struct {
  * Mode A / Apple mobile) dup2's a real pipe to fd DRM_VIRTUAL_FD so select/poll
  * work natively on the virtual fd.  -1 = not initialised. */
 int g_drm_event_pipe_write = -1;
+/* Durable read end. Client opens get a dup so libc close() / libseat
+ * close() cannot destroy the only reader (that left Weston waiting on a
+ * dead pipe after the first KMS modeset, IOMFB stuck on the black frame). */
+static int g_drm_event_pipe_read = -1;
 
 int iland_drm_prepare_virtual_fd(void)
 {
-    if (g_drm_event_pipe_write >= 0)
+    if (g_drm_event_pipe_write >= 0 && g_drm_event_pipe_read >= 0)
         return 0;
 
     int p[2];
     if (pipe(p) != 0)
         return -1;
 
+    if (g_drm_event_pipe_read >= 0)
+        close(g_drm_event_pipe_read);
+    if (g_drm_event_pipe_write >= 0)
+        close(g_drm_event_pipe_write);
+
+    g_drm_event_pipe_read = p[0];
+    g_drm_event_pipe_write = p[1];
+
     if (dup2(p[0], DRM_VIRTUAL_FD) < 0) {
         close(p[0]);
         close(p[1]);
+        g_drm_event_pipe_read = -1;
+        g_drm_event_pipe_write = -1;
         return -1;
     }
-    close(p[0]);
-    g_drm_event_pipe_write = p[1];
     return 0;
+}
+
+static int open_virtual_drm_client_fd(int flags)
+{
+    if (iland_drm_prepare_virtual_fd() != 0) {
+        errno = ENODEV;
+        return -1;
+    }
+    int fd = dup(g_drm_event_pipe_read);
+    if (fd < 0)
+        return -1;
+    if (flags & O_CLOEXEC)
+        (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+    if (flags & O_NONBLOCK)
+        (void)fcntl(fd, F_SETFL, O_NONBLOCK);
+    return fd;
 }
 
 /*
@@ -314,14 +342,28 @@ void iland_drm_complete_page_flip(uint32_t crtc_id, uint32_t fb_id)
 {
     pthread_mutex_lock(&g_flip_lock);
     int event_fd = -1;
+    int match = -1;
     for (int i = 0; i < g_flip_queue_count; i++) {
         iland_pending_flip_t *slot = &g_flip_queue[i];
         if (slot->armed && !slot->signaled &&
             slot->crtc_id == crtc_id && slot->fb_id == fb_id) {
-            slot->signaled = true;
-            event_fd = g_drm_event_pipe_write;
+            match = i;
             break;
         }
+    }
+    if (match < 0) {
+        for (int i = 0; i < g_flip_queue_count; i++) {
+            iland_pending_flip_t *slot = &g_flip_queue[i];
+            if (slot->armed && !slot->signaled &&
+                (slot->crtc_id == crtc_id || crtc_id == 0)) {
+                match = i;
+                break;
+            }
+        }
+    }
+    if (match >= 0) {
+        g_flip_queue[match].signaled = true;
+        event_fd = g_drm_event_pipe_write;
     }
     pthread_mutex_unlock(&g_flip_lock);
 
@@ -385,11 +427,16 @@ static void schedule_mode_b_page_flip(void)
 
 static int check_fd(int fd)
 {
-    if (fd != DRM_VIRTUAL_FD) {
+    if (fd < 0) {
         errno = EBADF;
         return -1;
     }
-    return 0;
+    /* One virtual card. Client fds are dups of the event-pipe read end, not
+     * only the hardcoded DRM_VIRTUAL_FD (42). */
+    if (fd == DRM_VIRTUAL_FD || g_drm_event_pipe_write >= 0)
+        return 0;
+    errno = EBADF;
+    return -1;
 }
 
 /* ── open / close ─────────────────────────────────────────────────────── */
@@ -397,13 +444,13 @@ static int check_fd(int fd)
 int drmOpen(const char *name, const char *busid)
 {
     (void)name; (void)busid;
-    return DRM_VIRTUAL_FD;
+    return open_virtual_drm_client_fd(O_RDWR | O_CLOEXEC);
 }
 
 int drmOpenWithType(const char *name, const char *busid, int type)
 {
     (void)name; (void)busid; (void)type;
-    return DRM_VIRTUAL_FD;
+    return open_virtual_drm_client_fd(O_RDWR | O_CLOEXEC);
 }
 
 int drmClose(int fd)
@@ -424,13 +471,8 @@ int drmClose(int fd)
  * privilege — App Store / Play safe. */
 int iland_drm_open_card(const char *path, int flags, ...)
 {
-    if (path && strncmp(path, "/dev/dri/", 9) == 0) {
-        if (iland_drm_prepare_virtual_fd() != 0) {
-            errno = ENODEV;
-            return -1;
-        }
-        return DRM_VIRTUAL_FD;
-    }
+    if (path && strncmp(path, "/dev/dri/", 9) == 0)
+        return open_virtual_drm_client_fd(flags);
 
     /* Non-DRM path: preserve libc open() semantics, including O_CREAT mode. */
     if (flags & O_CREAT) {
@@ -713,17 +755,20 @@ int drmModeDestroyDumbBuffer(int fd, uint32_t handle)
 void *iland_drm_mmap(void *addr, size_t length, int prot, int flags, int fd,
                      off_t offset)
 {
-    if (fd == DRM_VIRTUAL_FD) {
-        void *p = (void *)(uintptr_t)offset;
-        for (int i = 0; i < MAX_DUMB_BUFS; i++) {
-            if (g_dumb[i].handle != 0 && g_dumb[i].map == p) {
-                (void)addr;
-                (void)length;
-                (void)prot;
-                (void)flags;
-                return p;
-            }
+    /* MapDumb returns the CPU-shadow pointer as the fake offset. Match that
+     * on any client fd (opens now return a dup, not only fd 42). */
+    void *p = (void *)(uintptr_t)offset;
+    for (int i = 0; i < MAX_DUMB_BUFS; i++) {
+        if (g_dumb[i].handle != 0 && g_dumb[i].map == p) {
+            (void)addr;
+            (void)length;
+            (void)prot;
+            (void)flags;
+            (void)fd;
+            return p;
         }
+    }
+    if (fd == DRM_VIRTUAL_FD) {
         errno = EINVAL;
         return MAP_FAILED;
     }
@@ -1031,9 +1076,9 @@ int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id,
 
 int drmHandleEvent(int fd, drmEventContextPtr evctx)
 {
-    if (fd != DRM_VIRTUAL_FD) { errno = EBADF; return -1; }
+    if (fd < 0) { errno = EBADF; return -1; }
 
-    /* Read one event byte from the pipe */
+    /* Read one event byte from the caller's dup of the event pipe. */
     char byte;
     ssize_t n = read(fd, &byte, 1);
     if (n <= 0) {
@@ -1770,18 +1815,18 @@ int drmModeAtomicCommit(int fd, drmModeAtomicReq *req,
         if (g_obj_props[j].obj_id == 2) { cursor_props = &g_obj_props[j]; break; }
 
     uint32_t event_fb_id = 0;
-    if (flags & DRM_MODE_PAGE_FLIP_EVENT) {
-        for (int i = 0; i < req->prop_count; i++) {
-            if (req->prop_ids[i] == g_cached_prop_ids.fb_id &&
-                req->obj_ids[i] != 2) {
-                event_fb_id = (uint32_t)req->values[i];
-                break;
-            }
-        }
-        if (event_fb_id > 0 &&
-            arm_page_flip(1, event_fb_id, user_data) < 0)
-            return -1;
+    for (int i = 0; i < req->prop_count; i++) {
+        if (req->prop_ids[i] == g_cached_prop_ids.fb_id &&
+            req->obj_ids[i] != 2 &&
+            req->values[i] != 0)
+            event_fb_id = (uint32_t)req->values[i];
     }
+    if (event_fb_id == 0)
+        event_fb_id = g_state.crtc_fb_id;
+    if ((flags & DRM_MODE_PAGE_FLIP_EVENT) &&
+        event_fb_id > 0 &&
+        arm_page_flip(1, event_fb_id, user_data) < 0)
+        return -1;
 
     /* Apply all property changes */
     uint32_t new_fb_id = 0;
@@ -1877,9 +1922,23 @@ int drmModeAtomicCommit(int fd, drmModeAtomicReq *req,
         }
     }
 
-    if ((flags & DRM_MODE_PAGE_FLIP_EVENT) &&
-        event_fb_id > 0 && !g_present_cb)
-        schedule_mode_b_page_flip();
+    if ((flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 &&
+        (flags & DRM_MODE_PAGE_FLIP_EVENT) &&
+        event_fb_id > 0 && new_fb_id == 0) {
+        IOSurfaceRef surf = fb_id_to_surface(event_fb_id);
+        if (surf) {
+            flush_dumb_fb_to_surface(event_fb_id, surf);
+            if (g_present_cb)
+                g_present_cb(1, event_fb_id, surf, flags, g_present_user);
+        }
+    }
+
+    if ((flags & DRM_MODE_PAGE_FLIP_EVENT) && event_fb_id > 0) {
+        if (g_present_cb)
+            iland_drm_complete_page_flip(1, event_fb_id);
+        else
+            schedule_mode_b_page_flip();
+    }
 
     return 0;
 }
