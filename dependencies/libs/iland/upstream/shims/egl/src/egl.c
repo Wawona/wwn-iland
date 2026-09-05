@@ -670,6 +670,13 @@ static EGLShimDisplay *unwrap_display(EGLDisplay dpy)
 /* ANGLE on Apple often returns NULL from eglGetDisplay(DEFAULT). Ask for
  * the Metal platform display instead. Never hand out a wrapper whose
  * angle_display is NULL: eglInitialize then reports EGL_BAD_DISPLAY. */
+static void *g_angle_metal_native = NULL;
+
+void iland_egl_set_metal_native_display(void *native)
+{
+    g_angle_metal_native = native;
+}
+
 static EGLDisplay angle_default_display(void)
 {
     EGLDisplay d = real_eglGetDisplay
@@ -692,12 +699,21 @@ static EGLDisplay angle_default_display(void)
         (EGLAttrib)EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
         (EGLAttrib)EGL_NONE,
     };
-    d = getplat(EGL_PLATFORM_ANGLE_ANGLE, (void *)EGL_DEFAULT_DISPLAY, attribs);
-    if (!d) {
-        fprintf(stderr,
-                "iland: ANGLE DEFAULT and Metal platform displays are NULL\n");
+    void *natives[2];
+    int ncount = 0;
+    if (g_angle_metal_native)
+        natives[ncount++] = g_angle_metal_native;
+    natives[ncount++] = (void *)EGL_DEFAULT_DISPLAY;
+    for (int i = 0; i < ncount; i++) {
+        d = getplat(EGL_PLATFORM_ANGLE_ANGLE, natives[i], attribs);
+        if (d)
+            return d;
     }
-    return d;
+    fprintf(stderr,
+            "iland: ANGLE DEFAULT and Metal platform displays are NULL "
+            "(metal_native=%p)\n",
+            g_angle_metal_native);
+    return EGL_NO_DISPLAY;
 }
 
 static EGLShimSurface *unwrap_surface(EGLSurface surf)

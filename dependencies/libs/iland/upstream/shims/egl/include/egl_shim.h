@@ -9,6 +9,16 @@
  * not treat an ANGLE handle as a shim (that is EGL_BAD_DISPLAY). */
 #define ILAND_EGL_DISPLAY_MAGIC 0x494C4E44u
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Optional CAMetalLayer (or MTLDevice) for ANGLE Metal when
+ * eglGetDisplay(DEFAULT) returns NULL. */
+void iland_egl_set_metal_native_display(void *native);
+#ifdef __cplusplus
+}
+#endif
+
 /* Wayland winsys types stay opaque here; see shims/egl/include/iland_wl_winsys.h. */
 struct wl_display;
 struct wl_egl_window;
