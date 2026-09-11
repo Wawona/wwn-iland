@@ -34,6 +34,9 @@ int32_t wwn_iomfb_present_metal_texture(
     void *metal_texture,
     WwnIomfbDamage damage);
 int32_t wwn_iomfb_restore(void *session);
+/* Keep the last presented IOSurface on scanout (vsync hold). Stops
+ * SpringBoard / backboardd from winning the IOMFB swap race. */
+int32_t wwn_iomfb_set_exclusive(void *session, int32_t exclusive);
 /* A null session returns the most recent open failure. */
 const char *wwn_iomfb_last_error(void *session);
 void wwn_iomfb_destroy(void *session);

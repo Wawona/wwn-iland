@@ -22,12 +22,13 @@
 }:
 
 let
-  iland = buildModule.buildForMacOS "iland" { }; 
+  ilandVersion = import ./version.nix;
+  iland = buildModule.buildForMacOS "iland" { };
   angle = buildModule.buildForMacOS "angle" { };
 in
 pkgs.stdenv.mkDerivation {
   pname = "iland-gl-clients";
-  version = "0.1.0";
+  version = ilandVersion;
 
   src = ./upstream;
 
@@ -109,7 +110,7 @@ EOF
 
   meta = with lib; {
     description = "GL test clients (kmscube) over iland GBM/EGL/DRM + ANGLE for macOS";
-    homepage = "https://github.com/wawona/iland";
+    homepage = "https://github.com/Wawona/wwn-iland";
     license = licenses.mit;
     platforms = platforms.darwin;
   };

@@ -31,6 +31,7 @@
 }:
 
 let
+  ilandVersion = import ./version.nix;
   angle = buildModule.buildForMacOS "angle" { };
   # Wayland-EGL winsys: libwayland-client for the protocol calls, scanner +
   # protocol XML to generate the linux-dmabuf client bindings the winsys posts
@@ -41,7 +42,7 @@ let
 in
 pkgs.stdenv.mkDerivation {
   pname = "iland-userland";
-  version = "0.1.0";
+  version = ilandVersion;
 
   src = ./upstream;
 
@@ -239,7 +240,7 @@ pkgs.stdenv.mkDerivation {
 
   meta = with lib; {
     description = "iland userland in-window Linux-graphics compat (GBM/EGL/DRM over IOSurface+ANGLE) for macOS";
-    homepage = "https://github.com/wawona/iland";
+    homepage = "https://github.com/Wawona/wwn-iland";
     license = licenses.mit;
     platforms = platforms.darwin;
   };

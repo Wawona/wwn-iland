@@ -19,6 +19,7 @@
 }:
 
 let
+  ilandVersion = import ./version.nix;
   angle =
     if enableGl then
       buildModule.buildForIOS "angle" { inherit simulator; }
@@ -76,7 +77,7 @@ let
 in
 pkgs.stdenv.mkDerivation {
   pname = "iland-userland";
-  version = "0.1.0";
+  version = ilandVersion;
 
   src = ./upstream;
 
@@ -272,7 +273,7 @@ EOF
 
   meta = with lib; {
     description = "iland userland in-window Linux-graphics compat (GBM/EGL/DRM over IOSurface+ANGLE) for iOS";
-    homepage = "https://github.com/wawona/iland";
+    homepage = "https://github.com/Wawona/wwn-iland";
     license = licenses.mit;
     platforms = platforms.darwin;
   };

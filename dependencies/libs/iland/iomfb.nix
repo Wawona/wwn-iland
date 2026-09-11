@@ -14,6 +14,7 @@
 assert lib.assertMsg (!simulator) "iland-iomfb is TrollStore/Sileo device-only";
 
 let
+  ilandVersion = import ./version.nix;
   cargoTarget = "aarch64-apple-ios";
   rustToolchain = pkgs.rust-bin.stable.latest.default.override {
     targets = [ cargoTarget ];
@@ -25,7 +26,7 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "wwn-iland-iomfb";
-  version = "0.1.0";
+  version = ilandVersion;
   src = ../../../crates/wwn-iland-iomfb;
   __noChroot = true;
 
@@ -65,6 +66,7 @@ rustPlatform.buildRustPackage {
     mkdir -p $out/lib $out/include $out/nix-support
     cp libwwn_iland_iomfb.a $out/lib/
     cp include/wwn_iland_iomfb.h $out/include/
+    cp include/IOMobileFramebuffer.h $out/include/
     echo mode-b-ios-iomfb > $out/nix-support/iland-mode
   '';
 

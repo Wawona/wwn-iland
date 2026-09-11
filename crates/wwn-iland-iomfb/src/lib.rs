@@ -1,3 +1,6 @@
+//! FROZEN. Authority moved to github.com/Wawona/wwn-iomfb-rs.
+//! Do not add ABI guesses. Wawona #169 waits until that crate presents.
+//!
 //! Rust-owned policy and lifecycle for the iOS Mode B IOMFB display sink.
 //!
 //! Private Apple SPI and Objective-C Metal objects stay in the platform
@@ -12,6 +15,7 @@ const WWN_IOMFB_OK: i32 = 0;
 const WWN_IOMFB_INVALID: i32 = -1;
 const WWN_IOMFB_PLATFORM: i32 = -2;
 const WWN_IOMFB_STATE: i32 = -3;
+const WWN_IOMFB_BUFFERS: u32 = 3;
 
 fn last_open_error() -> &'static Mutex<[i8; 192]> {
     static ERROR: OnceLock<Mutex<[i8; 192]>> = OnceLock::new();
@@ -119,6 +123,7 @@ extern "C" {
         destination_index: u32,
     ) -> i32;
     fn wwn_iomfb_platform_restore(platform: *mut c_void) -> i32;
+    fn wwn_iomfb_platform_set_exclusive(platform: *mut c_void, exclusive: i32) -> i32;
     fn wwn_iomfb_platform_destroy(platform: *mut c_void);
 }
 
@@ -176,7 +181,7 @@ pub unsafe extern "C" fn wwn_iomfb_acquire(
     if let Err(code) = session.active() {
         return code;
     }
-    let back = 1 - session.front;
+    let back = (session.front + 1) % WWN_IOMFB_BUFFERS;
     let result = wwn_iomfb_platform_acquire(session.platform, back, out_surface);
     if result != 0 {
         session.set_error("platform failed to acquire IOMFB back buffer");
@@ -207,7 +212,7 @@ pub unsafe extern "C" fn wwn_iomfb_present_iosurface(
         session.set_error("direct IOSurface presentation failed");
         return WWN_IOMFB_PLATFORM;
     }
-    session.front = 1 - session.front;
+    session.front = (session.front + 1) % WWN_IOMFB_BUFFERS;
     session.frame = session.frame.wrapping_add(1);
     WWN_IOMFB_OK
 }
@@ -228,7 +233,7 @@ pub unsafe extern "C" fn wwn_iomfb_present_metal_texture(
         session.set_error("invalid Metal texture or damage");
         return WWN_IOMFB_INVALID;
     }
-    let back = 1 - session.front;
+    let back = (session.front + 1) % WWN_IOMFB_BUFFERS;
     let result =
         wwn_iomfb_platform_present_texture(session.platform, texture, damage, session.frame, back);
     if result != 0 {
@@ -255,6 +260,27 @@ pub unsafe extern "C" fn wwn_iomfb_restore(opaque: *mut c_void) -> i32 {
     }
     session.state = SinkState::Restored;
     eprintln!("wwn.iomfb op=restore result=ok frames={}", session.frame);
+    WWN_IOMFB_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wwn_iomfb_set_exclusive(opaque: *mut c_void, exclusive: i32) -> i32 {
+    let Some(session) = opaque.cast::<Session>().as_mut() else {
+        return WWN_IOMFB_INVALID;
+    };
+    if session.platform.is_null() {
+        session.set_error("IOMFB exclusive needs an open session");
+        return WWN_IOMFB_STATE;
+    }
+    let result = wwn_iomfb_platform_set_exclusive(session.platform, exclusive);
+    if result != 0 {
+        session.set_error("IOMFB exclusive hold failed");
+        return WWN_IOMFB_PLATFORM;
+    }
+    eprintln!(
+        "wwn.iomfb op=exclusive result=ok on={}",
+        exclusive != 0
+    );
     WWN_IOMFB_OK
 }
 

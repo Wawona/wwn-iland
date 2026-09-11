@@ -14,6 +14,7 @@
 }:
 
 let
+  ilandVersion = import ./version.nix;
   iland = buildModule.buildForIOS "iland" { inherit simulator; };
   angle = buildModule.buildForIOS "angle" { inherit simulator; };
   sdkPlatform = if simulator then "iPhoneSimulator" else "iPhoneOS";
@@ -25,7 +26,7 @@ let
 in
 pkgs.stdenv.mkDerivation {
   pname = "iland-gl-clients";
-  version = "0.1.0";
+  version = ilandVersion;
 
   src = ./upstream;
 
@@ -87,7 +88,7 @@ EOF
 
   meta = with lib; {
     description = "GL test clients (kmscube) over iland GBM/EGL/DRM + ANGLE for iOS";
-    homepage = "https://github.com/wawona/iland";
+    homepage = "https://github.com/Wawona/wwn-iland";
     license = licenses.mit;
     platforms = platforms.darwin;
   };

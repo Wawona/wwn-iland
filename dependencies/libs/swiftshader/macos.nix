@@ -5,8 +5,8 @@
   buildModule ? null,
   # Injected by wwn-toolchain (the Apple toolchain wrapper).
   xcodeUtils,
-  # Simulator variant reuses this recipe with a different SDK/sysroot (see
-  # ios.nix). macOS is the default.
+  # iOS variants reuse this recipe with a different SDK/sysroot (see ios.nix).
+  # macOS is the default.
   appleSdk ? "macosx",
   minVersionFlag ? "-mmacosx-version-min=12.0",
   # Extra -D flags the simulator variant needs (CMAKE_SYSTEM_NAME=iOS,
@@ -17,16 +17,13 @@
 
 # SwiftShader software Vulkan 1.3 ICD for Apple targets. nixpkgs' swiftshader is
 # Linux-only (meta.platforms is all *-linux), so we build the upstream CMake
-# project ourselves against the macOS / iOS-Simulator SDK. This is the
+# project ourselves against the macOS / iOS SDK. This is the
 # last-resort ICD in Wawona's Vulkan fallback chain (selected -> MoltenVK ->
 # SwiftShader): a pure-CPU device that always enumerates, so vkcube and other
 # Vulkan clients run even on a headless CI VM / Simulator with no usable
 # Metal-backed Vulkan device. It stays userland (no kernel graphics node) per
 # the mission's runtime-only rule.
 #
-# Device store builds must remain MoltenVK-only; this ICD is bundled for macOS
-# and the iOS *Simulator* / CI shape, never signed into on-device App Store
-# artifacts (see verify-iland-graphics-bundle.sh + the bundling gate).
 let
   src = pkgs.fetchFromGitHub {
     owner = "google";
@@ -46,10 +43,11 @@ let
     rev = "e2239ee6043f73722e7aa812a459f54a28552929";
     hash = "sha256-SjlJxushfry13RGA7BCjYC9oZqV4z6x8dOiHfl/wpF0=";
   };
-  isSimulator = appleSdk != "macosx";
+  isIOS = appleSdk == "iphoneos" || appleSdk == "iphonesimulator";
+  isSimulator = appleSdk == "iphonesimulator";
 in
 pkgs.stdenv.mkDerivation {
-  pname = "swiftshader-${if isSimulator then "ios-sim" else "macos"}";
+  pname = "swiftshader-${if appleSdk == "iphoneos" then "ios" else if isSimulator then "ios-sim" else "macos"}";
   version = "436722b";
   inherit src;
 
@@ -83,7 +81,7 @@ pkgs.stdenv.mkDerivation {
         's/cmake_minimum_required\(VERSION [0-9]+(\.[0-9]+)*/cmake_minimum_required(VERSION 3.5/' \
         "$f" || true
     done
-${lib.optionalString isSimulator ''
+${lib.optionalString isIOS ''
     # The iOS-Simulator SDK has no Cocoa or Quartz (macOS umbrella) frameworks, so
     # SwiftShader's APPLE branch find_library(Cocoa/Quartz) resolves to NOTFOUND
     # and the generate step aborts. They are only used for SwiftShader's macOS
@@ -113,9 +111,9 @@ ${lib.optionalString isSimulator ''
     SDKROOT=$(xcrun --sdk ${appleSdk} --show-sdk-path 2>/dev/null || true)
     if [ ! -d "$SDKROOT" ]; then
       SDKROOT=$(${xcodeUtils.findXcodeScript}/bin/find-xcode)/Contents/Developer/Platforms/${
-        if appleSdk == "iphonesimulator" then "iPhoneSimulator" else "MacOSX"
+        if appleSdk == "iphonesimulator" then "iPhoneSimulator" else if appleSdk == "iphoneos" then "iPhoneOS" else "MacOSX"
       }.platform/Developer/SDKs/${
-        if appleSdk == "iphonesimulator" then "iPhoneSimulator" else "MacOSX"
+        if appleSdk == "iphonesimulator" then "iPhoneSimulator" else if appleSdk == "iphoneos" then "iPhoneOS" else "MacOSX"
       }.sdk
     fi
     test -d "$SDKROOT" || { echo "ERROR: ${appleSdk} SDK not found" >&2; exit 1; }
@@ -123,7 +121,7 @@ ${lib.optionalString isSimulator ''
 
     CC_LAUNCH="$(command -v clang)"
     CXX_LAUNCH="$(command -v clang++)"
-${lib.optionalString isSimulator ''
+${lib.optionalString isIOS ''
     # The nixpkgs macOS stdenv clang *wrapper* re-injects -mmacos-version-min
     # internally (not on the visible argv), which clang refuses alongside
     # -mios-simulator-version-min — and there is no runtime env knob to unbake it.
@@ -210,7 +208,7 @@ EOF
   '';
 
   meta = with lib; {
-    description = "SwiftShader software Vulkan ICD for ${if isSimulator then "the iOS Simulator" else "macOS"}";
+    description = "SwiftShader software Vulkan ICD for ${if appleSdk == "iphoneos" then "iOS" else if isSimulator then "the iOS Simulator" else "macOS"}";
     homepage = "https://swiftshader.googlesource.com/SwiftShader";
     license = licenses.asl20;
     platforms = platforms.darwin;

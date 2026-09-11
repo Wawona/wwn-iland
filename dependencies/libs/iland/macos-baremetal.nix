@@ -17,6 +17,7 @@
 }:
 
 let
+  ilandVersion = import ./version.nix;
   angle = buildModule.buildForMacOS "angle" { };
 
   # Pinned Dobby (upstream CMake FetchContent target). Keep in sync with
@@ -30,7 +31,7 @@ let
 in
 pkgs.stdenv.mkDerivation {
   pname = "iland-baremetal";
-  version = "0.1.0";
+  version = ilandVersion;
 
   src = ./upstream;
 

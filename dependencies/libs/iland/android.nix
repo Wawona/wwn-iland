@@ -15,6 +15,7 @@
 }:
 
 let
+  ilandVersion = import ./version.nix;
   angle = buildModule.buildForAndroid "angle" { };
   libwayland = buildModule.buildForAndroid "libwayland" { };
   androidDir = ./android;
@@ -23,7 +24,7 @@ let
 in
 pkgs.stdenv.mkDerivation {
   pname = "iland-userland";
-  version = "0.1.0";
+  version = ilandVersion;
 
   src = ./upstream;
 
@@ -240,7 +241,7 @@ EOF
 
   meta = with lib; {
     description = "iland userland in-window Linux-graphics compat (GBM/EGL/DRM + ANGLE) for Android";
-    homepage = "https://github.com/wawona/iland";
+    homepage = "https://github.com/Wawona/wwn-iland";
     license = licenses.mit;
     platforms = platforms.linux;
   };

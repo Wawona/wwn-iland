@@ -94,6 +94,12 @@ nix build .#iland-ios                # Mode A iOS archive
 nix build .#iland-baremetal-macos    # Mode B dylib (macOS only)
 ```
 
+## Versioning
+
+`VERSION` at the repo root is CalVer (`YY.M.D`). Nix packages (`iland-userland`,
+`iland-baremetal`, gl-clients, iomfb) and Wawona Settings → Dependencies read
+that file. Tag releases as `vYY.M.D`.
+
 ## License
 
 The Wawona Nix packaging in this repo is MIT (see `LICENSE`). The vendored

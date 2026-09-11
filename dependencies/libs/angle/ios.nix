@@ -1,7 +1,7 @@
 # ANGLE for Apple mobile — static .a archives (Metal backend, App Store–safe).
-# Prebuilt (default): XCSoar static libs force-loaded into the app binary
-# (ILAND_ANGLE_STATIC — no dlopen, no Frameworks/libEGL.dylib).
-# GN cross-build (usePrebuilt=false) is the from-source fallback.
+# iOS uses the GN source build so Wawona's thin iOS 11 compatibility patch
+# queue applies to the single shipped Metal backend. XCSoar prebuilts remain
+# available only as an explicit diagnostic escape hatch.
 {
   lib,
   pkgs,
@@ -10,7 +10,7 @@
   buildModule ? null,
   simulator ? false,
   iosToolchain ? null,
-  usePrebuilt ? true,
+  usePrebuilt ? false,
 }:
 
 let
@@ -136,7 +136,10 @@ else
   import ./cross-base.nix {
     inherit lib pkgs buildPackages;
     pname = "angle-${packageSuffix}";
-    clangBasePath = if needsSourceBuild then "xcode-clang" else null;
+    # GN's default Nix LLVM wrapper injects Darwin headers before the iPhoneOS
+    # sysroot. That breaks the C integer typedefs in the latest SDK. Point GN
+    # at a small Xcode-clang shim for every Apple-mobile source build.
+    clangBasePath = "xcode-clang";
     buildTargets = "angle_common libEGL_static libGLESv2_static";
     patchesExtra = lib.optionals isVisionOS [
       xrosPatch
@@ -182,21 +185,19 @@ else
       export CFLAGS="-arch arm64 -isysroot $SDKROOT ${minFlag}"
       export CXXFLAGS="$CFLAGS"
       export LDFLAGS="-arch arm64 -isysroot $SDKROOT ${minFlag}"
-      ${lib.optionalString needsSourceBuild ''
-        rm -rf .angle-xcode-clang
-        mkdir -p .angle-xcode-clang/bin
-        ln -s "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang" \
-          .angle-xcode-clang/bin/clang
-        ln -s "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++" \
-          .angle-xcode-clang/bin/clang++
-        ln -s "$LLVM_AR" .angle-xcode-clang/bin/llvm-ar
-        ln -s "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/lib" \
-          .angle-xcode-clang/lib
-        for clang_dir in build/config/clang build/toolchain/ios; do
-          rm -rf "$clang_dir/xcode-clang"
-          ln -s "$PWD/.angle-xcode-clang" "$clang_dir/xcode-clang"
-        done
-      ''}
+      rm -rf .angle-xcode-clang
+      mkdir -p .angle-xcode-clang/bin
+      ln -s "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang" \
+        .angle-xcode-clang/bin/clang
+      ln -s "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++" \
+        .angle-xcode-clang/bin/clang++
+      ln -s "$LLVM_AR" .angle-xcode-clang/bin/llvm-ar
+      ln -s "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/lib" \
+        .angle-xcode-clang/lib
+      for clang_dir in build/config/clang build/toolchain/ios; do
+        rm -rf "$clang_dir/xcode-clang"
+        ln -s "$PWD/.angle-xcode-clang" "$clang_dir/xcode-clang"
+      done
     '';
     installHook = ''
       OUT_DIR=out
