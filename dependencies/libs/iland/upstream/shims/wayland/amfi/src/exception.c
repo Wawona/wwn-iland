@@ -1,4 +1,3 @@
-#import <Foundation/Foundation.h>
 #include "amfid_handler.h"
 #include <unistd.h>
 #include <dlfcn.h>

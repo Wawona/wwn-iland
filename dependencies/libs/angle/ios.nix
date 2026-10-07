@@ -245,6 +245,10 @@ else
         fi
       }
       for archive in $out/lib/libEGL.a $out/lib/libGLESv2.a; do
+        if list_defined "$archive" | grep -E '[[:space:]]_vk[A-Z][[:alnum:]_]*$' >/dev/null; then
+          echo "ERROR: ANGLE Vulkan globals collide with the native Vulkan provider: $archive" >&2
+          exit 1
+        fi
         for sym in eglCreateImageKHR eglDestroyImageKHR glEGLImageTargetTexture2DOES; do
           # Match as a whole nm field (avoid awk+$NF; some nm lines confuse -qx).
           # Nix indented-string escape so bash receives the loop variable.

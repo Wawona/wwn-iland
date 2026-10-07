@@ -1,4 +1,4 @@
-add_executable(framebufferd src/main.m)
+add_executable(framebufferd src/main.c)
 
 target_include_directories(framebufferd PRIVATE
   ${CMAKE_SOURCE_DIR}/shims/drm/drm/include

@@ -42,6 +42,10 @@ OBJCOPY="$(resolve_tool LLVM_OBJCOPY llvm-objcopy llvm-objcopy)" || {
 }
 AR="$(resolve_tool LLVM_AR llvm-ar llvm-ar)" || AR=ar
 RANLIB="$(resolve_tool LLVM_RANLIB llvm-ranlib llvm-ranlib)" || RANLIB=ranlib
+NM="$(resolve_tool LLVM_NM llvm-nm llvm-nm)" || {
+  echo "ERROR: llvm-nm not found (set LLVM_NM)" >&2
+  exit 1
+}
 
 SYMS=(
   eglGetDisplay eglInitialize eglTerminate eglGetError eglQueryString
@@ -57,6 +61,15 @@ SYMS=(
   eglCreateImage eglDestroyImage
   glEGLImageTargetTexture2DOES
 )
+
+# ANGLE's common objects include Volk's global Vulkan function pointers even
+# in Metal-only builds. Keep their storage and references private to ANGLE;
+# otherwise MoltenVK's public functions replace these data symbols at link.
+while IFS= read -r sym; do
+  SYMS+=("$sym")
+done < <("$NM" --defined-only --extern-only --format=posix "$in" |
+  awk '$1 ~ /^_vk[A-Z][A-Za-z0-9_]*$/ && $2 ~ /^[BCDS]$/ { print substr($1, 2) }' |
+  LC_ALL=C sort -u)
 
 args=()
 for sym in "${SYMS[@]}"; do

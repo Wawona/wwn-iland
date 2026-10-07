@@ -152,8 +152,8 @@ EOF
 
     OBJS=""
     CORE_SRCS="
-      shims/drm/displaysurface/src/DisplaySurface.m
-      shims/gbm/src/gbm.m
+      shims/drm/displaysurface/src/DisplaySurface.c
+      shims/gbm/src/gbm.c
       shims/drm/drm/src/drm_linux.c
       shims/drm/drm/src/drm_ioctl.c
       shims/drm/drm/src/drm_ios_ipc_stubs.c

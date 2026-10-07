@@ -1,4 +1,4 @@
-add_library(displaysurface STATIC src/DisplaySurface.m)
+add_library(displaysurface STATIC src/DisplaySurface.c)
 
 target_include_directories(displaysurface PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include

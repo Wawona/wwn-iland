@@ -24,10 +24,18 @@
 
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
-@interface NSObject (FBPDisplay)
-- (void)presentSurface:(IOSurfaceRef)surface withOptions:(NSDictionary *)options;
-- (CGRect)bounds;
-@end
+static void fbp_present_surface(id display, IOSurfaceRef surface)
+{
+    if (!display || !surface)
+        return;
+    SEL sel = sel_registerName("presentSurface:withOptions:");
+    if (![display respondsToSelector:sel])
+        return;
+    id options = [NSDictionary dictionary];
+    void (*send)(id, SEL, IOSurfaceRef, id) =
+        (void (*)(id, SEL, IOSurfaceRef, id))objc_msgSend;
+    send(display, sel, surface, options);
+}
 
 /* ── SkyLight / CoreDisplay SPI marker ────────────────────────────────── */
 
@@ -147,7 +155,7 @@ static void TimerCallback(CFRunLoopTimerRef timer, void *info)
         if (!client) return;
 
         IOSurfaceRef frame = surface_for_present(client);
-        [g_display presentSurface:frame withOptions:@{}];
+        fbp_present_surface(g_display, frame);
         uint64_t n = ++g_present_count;
         if (n == 1 || (n % 60) == 0) {
             fprintf(stderr,

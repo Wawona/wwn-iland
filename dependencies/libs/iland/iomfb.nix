@@ -54,7 +54,7 @@ rustPlatform.buildRustPackage {
     "$XCODE_CLANG" -fobjc-arc -O2 -fPIC \
       -isysroot "$SDKROOT" "$APPLE_DEPLOYMENT_FLAG" \
       -Iinclude \
-      -c ffi/iomfb_platform.m -o iomfb_platform.o
+      -x objective-c -c ffi/iomfb_platform.c -o iomfb_platform.o
     "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/libtool" \
       -static -o libwwn_iland_iomfb.a \
       target/${cargoTarget}/release/libwwn_iland_iomfb.a \

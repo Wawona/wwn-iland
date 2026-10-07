@@ -1,4 +1,4 @@
-add_library(gbm STATIC src/gbm.m)
+add_library(gbm STATIC src/gbm.c)
 
 target_include_directories(gbm PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include

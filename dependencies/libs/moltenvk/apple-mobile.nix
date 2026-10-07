@@ -38,6 +38,17 @@ let
   xcodeOS = if isVisionOS then "xrOS" else if isTVOS then "tvOS" else "iOS";
   upstreamPackageOS = if isVisionOS then "visionOS" else if isTVOS then "tvOS" else "iOS";
   staticScheme = "Wawona MoltenVK ${xcodeOS} static";
+  # Packaging schemes point at the dynamic product. Retarget each scheme at
+  # that platform's static target. The iOS id is not present in the tvOS or
+  # visionOS scheme.
+  packageTargetId =
+    if isTVOS then "2FEA0A2F24902F5E00EEF3AD"
+    else if isVisionOS then "DCFD7ED52A45BC56007BBBF7"
+    else "A975D5782140585200D4834F";
+  staticTargetId =
+    if isTVOS then "2FEA0A3B24902F9F00EEF3AD"
+    else if isVisionOS then "DCFD7EDF2A45BC6E007BBBF7"
+    else "A9B8EE091A98D796009C5A02";
 
   # These revisions are recorded by MoltenVK v1.4.2's ExternalRevisions.
   # Only the pieces linked into the public MoltenVK runtime are hydrated.
@@ -115,9 +126,9 @@ pkgs.stdenv.mkDerivation (finalAttrs: {
     cp "MoltenVKPackaging.xcodeproj/xcshareddata/xcschemes/MoltenVK Package (${upstreamPackageOS} only).xcscheme" \
       "MoltenVK/MoltenVK.xcodeproj/xcshareddata/xcschemes/${staticScheme}.xcscheme"
     substituteInPlace "MoltenVK/MoltenVK.xcodeproj/xcshareddata/xcschemes/${staticScheme}.xcscheme" \
-      --replace-fail A975D5782140585200D4834F A9B8EE091A98D796009C5A02 \
-      --replace-fail 'BuildableName = "MoltenVK-${upstreamPackageOS}"' 'BuildableName = "libMoltenVK.a"' \
-      --replace-fail 'BlueprintName = "MoltenVK-${upstreamPackageOS}"' 'BlueprintName = "MoltenVK-${xcodeOS}-static"' \
+      --replace-fail ${packageTargetId} ${staticTargetId} \
+      --replace-fail 'BuildableName = "MoltenVK-${xcodeOS}"' 'BuildableName = "libMoltenVK.a"' \
+      --replace-fail 'BlueprintName = "MoltenVK-${xcodeOS}"' 'BlueprintName = "MoltenVK-${xcodeOS}-static"' \
       --replace-fail 'container:MoltenVKPackaging.xcodeproj' 'container:MoltenVK.xcodeproj'
     mkdir -p build/include
   '';

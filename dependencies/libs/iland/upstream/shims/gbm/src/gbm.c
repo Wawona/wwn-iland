@@ -1,6 +1,5 @@
-#import <gbm_priv.h>
-#import <Foundation/Foundation.h>
-#import <IOSurface/IOSurface.h>
+#include <gbm_priv.h>
+#include <IOSurface/IOSurface.h>
 #import <stdlib.h>
 #import <string.h>
 #import <errno.h>

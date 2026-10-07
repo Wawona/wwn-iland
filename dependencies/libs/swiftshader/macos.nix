@@ -8,6 +8,9 @@
   # iOS variants reuse this recipe with a different SDK/sysroot (see ios.nix).
   # macOS is the default.
   appleSdk ? "macosx",
+  # Apple mobile links SwiftShader directly into the app. macOS retains an
+  # app-owned dynamic ICD for runtime selection.
+  buildShared ? true,
   minVersionFlag ? "-mmacosx-version-min=12.0",
   # Extra -D flags the simulator variant needs (CMAKE_SYSTEM_NAME=iOS,
   # CMAKE_OSX_ARCHITECTURES, CMAKE_OSX_DEPLOYMENT_TARGET, …).
@@ -47,7 +50,7 @@ let
   isSimulator = appleSdk == "iphonesimulator";
 in
 pkgs.stdenv.mkDerivation {
-  pname = "swiftshader-${if appleSdk == "iphoneos" then "ios" else if isSimulator then "ios-sim" else "macos"}";
+  pname = "swiftshader-${if appleSdk == "iphoneos" then "ios" else if isSimulator then "ios-sim" else "macos"}${lib.optionalString (!buildShared) "-static"}";
   version = "436722b";
   inherit src;
 
@@ -81,6 +84,27 @@ pkgs.stdenv.mkDerivation {
         's/cmake_minimum_required\(VERSION [0-9]+(\.[0-9]+)*/cmake_minimum_required(VERSION 3.5/' \
         "$f" || true
     done
+${lib.optionalString (!buildShared) ''
+    # SwiftShader declares its Vulkan ICD explicitly SHARED, so the generic
+    # BUILD_SHARED_LIBS switch cannot make an Apple-mobile archive. Mobile
+    # Wawona links this provider in-process; do not emit a dylib or ICD.
+    substituteInPlace src/Vulkan/CMakeLists.txt \
+      --replace-fail 'add_library(vk_swiftshader SHARED' 'add_library(vk_swiftshader STATIC'
+    # Keep this in-process provider distinct from MoltenVK's Vulkan ABI.
+    # Proc-address lookup strings remain upstream names; only C symbols change.
+    python3 - <<'PY_NAMESPACE'
+from pathlib import Path
+import re
+names = set()
+for source in Path("src").rglob("*"):
+    if source.suffix in {".cpp", ".hpp", ".h", ".mm"}:
+        names.update(re.findall(r"\b(vk[A-Z]\w*|vk_icd\w*)\s*\(", source.read_text()))
+assert "vkGetInstanceProcAddr" in names
+Path("wawona-static-vulkan-namespace.h").write_text(
+    "#pragma once\n" + "".join(
+        f"#define {name} wwn_swiftshader_{name}\n" for name in sorted(names)))
+PY_NAMESPACE
+''}
 ${lib.optionalString isIOS ''
     # The iOS-Simulator SDK has no Cocoa or Quartz (macOS umbrella) frameworks, so
     # SwiftShader's APPLE branch find_library(Cocoa/Quartz) resolves to NOTFOUND
@@ -107,7 +131,7 @@ ${lib.optionalString isIOS ''
   configurePhase = ''
     runHook preConfigure
 
-    unset DEVELOPER_DIR
+    export DEVELOPER_DIR="$(${xcodeUtils.findXcodeScript}/bin/find-xcode)/Contents/Developer"
     SDKROOT=$(xcrun --sdk ${appleSdk} --show-sdk-path 2>/dev/null || true)
     if [ ! -d "$SDKROOT" ]; then
       SDKROOT=$(${xcodeUtils.findXcodeScript}/bin/find-xcode)/Contents/Developer/Platforms/${
@@ -154,6 +178,9 @@ ${lib.optionalString isIOS ''
     # unless the C99 limit/constant/format macros are defined before <cstdint>
     # on a modern libc++ (Apple clang). Define them project-wide.
     STDC_MACRO_FLAGS="-D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS"
+${lib.optionalString (!buildShared) ''
+    STDC_MACRO_FLAGS="$STDC_MACRO_FLAGS -include $PWD/wawona-static-vulkan-namespace.h"
+''}
     cmake -S . -B build -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER="$CC_LAUNCH" \
@@ -164,6 +191,7 @@ ${lib.optionalString isIOS ''
       -DSWIFTSHADER_BUILD_PVR=OFF \
       -DSWIFTSHADER_BUILD_BENCHMARKS=OFF \
       -DSWIFTSHADER_WARNINGS_AS_ERRORS=OFF \
+      -DBUILD_SHARED_LIBS=${if buildShared then "ON" else "OFF"} \
       -DCMAKE_C_FLAGS="${minVersionFlag} $STDC_MACRO_FLAGS" \
       -DCMAKE_CXX_FLAGS="${minVersionFlag} $STDC_MACRO_FLAGS" \
       -DCMAKE_POLICY_VERSION_MINIMUM=3.5
@@ -173,22 +201,46 @@ ${lib.optionalString isIOS ''
 
   buildPhase = ''
     runHook preBuild
-    cmake --build build --parallel "$NIX_BUILD_CORES"
+    cmake --build build --target vk_swiftshader --parallel "$NIX_BUILD_CORES"
     runHook postBuild
   '';
 
   installPhase = ''
     runHook preInstall
-    mkdir -p "$out/lib" "$out/lib/vulkan/icd.d"
+    mkdir -p "$out/lib"
 
-    icd=$(find build -type f -name 'libvk_swiftshader.dylib' -print -quit)
+    icd=$(find build -type f -name '${if buildShared then "libvk_swiftshader.dylib" else "libvk_swiftshader.a"}' -print -quit)
     test -n "$icd" || {
-      echo "SwiftShader ${appleSdk} Vulkan ICD (libvk_swiftshader.dylib) was not produced" >&2
-      find build -name 'libvk_swiftshader*' -o -name '*.dylib' | head -50 >&2
+      echo "SwiftShader ${appleSdk} ${if buildShared then "Vulkan ICD (libvk_swiftshader.dylib)" else "static Vulkan archive (libvk_swiftshader.a)"} was not produced" >&2
+      find build -name 'libvk_swiftshader*' -o -name '*.dylib' -o -name '*.a' | head -50 >&2
       exit 1
     }
+${if buildShared then ''
     install -m755 "$icd" "$out/lib/libvk_swiftshader.dylib"
+'' else ''
+    # A STATIC target does not absorb its transitive static libraries. Merge
+    # the built target closure, excluding upstream's post-build API copies.
+    # Building only vk_swiftshader keeps unrelated tools/tests out of this set.
+    archives=()
+    while IFS= read -r archive; do archives+=("$archive"); done < <(
+      find build -type f -name '*.a' \
+        ! -path 'build/bin/*' ! -path 'build/iOS/*' ! -path 'build/Darwin/*' \
+        -print | LC_ALL=C sort
+    )
+    test "''${#archives[@]}" -gt 1
+    xcrun --sdk ${appleSdk} libtool -static -o "$out/lib/libvk_swiftshader.a" "''${archives[@]}"
+    # Prove the public ABI is namespaced, rather than accepting a duplicate
+    # definition beside MoltenVK. Full app linking proves dependency closure.
+    xcrun --sdk ${appleSdk} nm -gU "$out/lib/libvk_swiftshader.a" > "$TMPDIR/swiftshader-symbols.txt"
+    grep -E ' T _wwn_swiftshader_vkGetInstanceProcAddr$' "$TMPDIR/swiftshader-symbols.txt"
+    if grep -E ' T _vk(GetInstanceProcAddr|CreateInstance)$' "$TMPDIR/swiftshader-symbols.txt"; then
+      echo "SwiftShader static archive leaks the shared Vulkan ABI" >&2
+      exit 1
+    fi
+''}
 
+${lib.optionalString buildShared ''
+    mkdir -p "$out/lib/vulkan/icd.d"
     manifest=$(find build -type f -name 'vk_swiftshader_icd.json' -print -quit)
     if [ -n "$manifest" ]; then
       install -m644 "$manifest" "$out/lib/vulkan/icd.d/vk_swiftshader_icd.json"
@@ -204,6 +256,7 @@ ${lib.optionalString isIOS ''
   }
 }
 EOF
+''}
     runHook postInstall
   '';
 

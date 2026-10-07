@@ -1,7 +1,7 @@
 /* FROZEN. Authority moved to github.com/Wawona/wwn-iomfb-rs.
  * Do not grow this trampoline or guess new ABI.
  */
-#import <Foundation/Foundation.h>
+#include <CoreFoundation/CoreFoundation.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import <Metal/Metal.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -37,8 +37,7 @@ typedef IOMobileFramebufferReturn (*FnDefaultSurface)(
     IOSurfaceRef *);
 typedef IOMobileFramebufferReturn (*FnPowerSave)(IOMobileFramebufferRef, int);
 
-@interface WWNIOMFBPlatformSession : NSObject {
-@public
+typedef struct WWNIOMFBPlatformSession {
     IOMobileFramebufferRef display;
     IOSurfaceRef surfaces[WWN_IOMFB_LAYER_COUNT];
     IOSurfaceRef lastSurface;
@@ -51,67 +50,88 @@ typedef IOMobileFramebufferReturn (*FnPowerSave)(IOMobileFramebufferRef, int);
     FnSwapSetLayer swapSetLayer;
     FnDefaultSurface getDefaultSurface;
     FnPowerSave powerSave;
-    id<MTLDevice> device;
-    id<MTLCommandQueue> queue;
-    id<MTLTexture> textures[WWN_IOMFB_LAYER_COUNT];
-    BOOL restored;
-    BOOL exclusive;
-    BOOL holdRunning;
+    id device;
+    id queue;
+    id textures[WWN_IOMFB_LAYER_COUNT];
+    bool restored;
+    bool exclusive;
+    bool holdRunning;
     pthread_t holdThread;
     os_unfair_lock presentLock;
     uint64_t lastPresentNs;
-}
-@end
+} WWNIOMFBPlatformSession;
 
-@implementation WWNIOMFBPlatformSession
-- (void)dealloc {
-    exclusive = NO;
-    if (holdRunning) {
-        pthread_join(holdThread, NULL);
-        holdRunning = NO;
+static void wwn_iomfb_session_destroy(WWNIOMFBPlatformSession *session)
+{
+    if (!session)
+        return;
+    session->exclusive = false;
+    if (session->holdRunning) {
+        pthread_join(session->holdThread, NULL);
+        session->holdRunning = false;
     }
-    if (lastSurface) {
-        CFRelease(lastSurface);
-        lastSurface = NULL;
+    if (session->lastSurface) {
+        CFRelease(session->lastSurface);
+        session->lastSurface = NULL;
     }
-    if (defaultSurface) {
-        CFRelease(defaultSurface);
-        defaultSurface = NULL;
+    if (session->defaultSurface) {
+        CFRelease(session->defaultSurface);
+        session->defaultSurface = NULL;
     }
     for (int i = 0; i < WWN_IOMFB_LAYER_COUNT; ++i) {
-        if (surfaces[i]) {
-            CFRelease(surfaces[i]);
-            surfaces[i] = NULL;
+        if (session->surfaces[i]) {
+            CFRelease(session->surfaces[i]);
+            session->surfaces[i] = NULL;
+        }
+        if (session->textures[i]) {
+            CFRelease((__bridge CFTypeRef)session->textures[i]);
+            session->textures[i] = nil;
         }
     }
+    if (session->queue) {
+        CFRelease((__bridge CFTypeRef)session->queue);
+        session->queue = nil;
+    }
+    if (session->device) {
+        CFRelease((__bridge CFTypeRef)session->device);
+        session->device = nil;
+    }
+    free(session);
 }
-@end
 
-static void write_error(char *error, size_t capacity, NSString *message) {
+static void write_error(char *error, size_t capacity, const char *message) {
     if (!error || capacity == 0) return;
-    const char *utf8 = message.UTF8String ?: "unknown IOMFB error";
-    snprintf(error, capacity, "%s", utf8);
+    if (!message) message = "unknown IOMFB error";
+    snprintf(error, capacity, "%s", message);
 }
 
 static IOSurfaceRef make_surface(uint32_t width, uint32_t height) {
     const uint32_t bytesPerElement = 4;
-    const uint32_t pixelFormat = 'BGRA';
-    NSDictionary *properties = @{
-        (id)kIOSurfaceWidth: @(width),
-        (id)kIOSurfaceHeight: @(height),
-        (id)kIOSurfacePixelFormat: @(pixelFormat),
-        (id)kIOSurfaceBytesPerElement: @(bytesPerElement),
-    };
-    return IOSurfaceCreate((__bridge CFDictionaryRef)properties);
+    const uint32_t pixelFormat = (uint32_t)'BGRA';
+    CFNumberRef nw = CFNumberCreate(NULL, kCFNumberIntType, &width);
+    CFNumberRef nh = CFNumberCreate(NULL, kCFNumberIntType, &height);
+    CFNumberRef npf = CFNumberCreate(NULL, kCFNumberSInt32Type, &pixelFormat);
+    CFNumberRef nbpe = CFNumberCreate(NULL, kCFNumberIntType, &bytesPerElement);
+    const void *keys[] = {kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfacePixelFormat,
+                          kIOSurfaceBytesPerElement};
+    const void *vals[] = {nw, nh, npf, nbpe};
+    CFDictionaryRef props =
+        CFDictionaryCreate(NULL, keys, vals, 4, &kCFTypeDictionaryKeyCallBacks,
+                           &kCFTypeDictionaryValueCallBacks);
+    CFRelease(nw);
+    CFRelease(nh);
+    CFRelease(npf);
+    CFRelease(nbpe);
+    return IOSurfaceCreate(props);
 }
 
-static BOOL valid_surface(
+static bool valid_surface(
     WWNIOMFBPlatformSession *session,
     IOSurfaceRef surface) {
-    if (!surface) return NO;
+    if (!surface) return false;
     if (IOSurfaceGetWidth(surface) != session->width ||
         IOSurfaceGetHeight(surface) != session->height) {
-        return NO;
+        return false;
     }
     OSType format = IOSurfaceGetPixelFormat(surface);
     return format == 'BGRA' || format == 'ARGB';
@@ -170,7 +190,7 @@ static int present_surface(
 }
 
 static void *wwn_iomfb_hold_main(void *arg) {
-    WWNIOMFBPlatformSession *session = (__bridge WWNIOMFBPlatformSession *)arg;
+    WWNIOMFBPlatformSession *session = (WWNIOMFBPlatformSession *)arg;
     uint64_t holdFrame = 0;
     /* Re-present only when iOS may have stolen scanout (no client swap
      * for about one 60 Hz period). Busy swapping fights Weston. */
@@ -204,7 +224,7 @@ void *wwn_iomfb_platform_open(
         "IOMobileFramebuffer",
         RTLD_NOW | RTLD_LOCAL);
     if (!framework) {
-        write_error(error, error_capacity, @"IOMobileFramebuffer load failed");
+        write_error(error, error_capacity, "IOMobileFramebuffer load failed");
         return NULL;
     }
     FnGetMain getMain = (FnGetMain)dlsym(
@@ -230,7 +250,7 @@ void *wwn_iomfb_platform_open(
     FnPowerChange powerChange = (FnPowerChange)dlsym(
         framework, "IOMobileFramebufferRequestPowerChange");
     if (!getMain || !getSize || !swapBegin || !swapEnd || !swapSetLayer) {
-        write_error(error, error_capacity, @"IOMobileFramebuffer symbols missing");
+        write_error(error, error_capacity, "IOMobileFramebuffer symbols missing");
         return NULL;
     }
 
@@ -240,19 +260,19 @@ void *wwn_iomfb_platform_open(
         result = getSecondary(&display);
     }
     if (result != 0 || !display) {
-        write_error(error, error_capacity, @"IOMobileFramebuffer display unavailable");
+        write_error(error, error_capacity, "IOMobileFramebuffer display unavailable");
         return NULL;
     }
     IOMobileFramebufferDisplaySize size = {0};
     result = getSize(display, &size);
     if (result != 0 || size.width == 0 || size.height == 0) {
-        write_error(error, error_capacity, @"IOMobileFramebuffer size unavailable");
+        write_error(error, error_capacity, "IOMobileFramebuffer size unavailable");
         return NULL;
     }
     uint32_t width = (uint32_t)size.width;
     uint32_t height = (uint32_t)size.height;
 
-    WWNIOMFBPlatformSession *session = [WWNIOMFBPlatformSession new];
+    WWNIOMFBPlatformSession *session = calloc(1, sizeof(*session));
     session->display = display;
     session->width = width;
     session->height = height;
@@ -277,15 +297,15 @@ void *wwn_iomfb_platform_open(
     if (powerChange) {
         (void)powerChange(display, 1);
     }
-    BOOL allocated = YES;
+    bool allocated = true;
     for (int i = 0; i < WWN_IOMFB_LAYER_COUNT; ++i) {
         session->surfaces[i] = make_surface(width, height);
         if (!session->surfaces[i]) {
-            allocated = NO;
+            allocated = false;
         }
     }
     if (!allocated) {
-        write_error(error, error_capacity, @"IOMFB IOSurface allocation failed");
+        write_error(error, error_capacity, "IOMFB IOSurface allocation failed");
         return NULL;
     }
 
@@ -317,7 +337,7 @@ void *wwn_iomfb_platform_open(
            width, height, session->device != nil,
            swapWait != NULL, session->defaultSurface != NULL,
            WWN_IOMFB_LAYER_COUNT);
-    return (__bridge_retained void *)session;
+    return (void *)session;
 }
 
 int32_t wwn_iomfb_platform_acquire(
@@ -328,7 +348,7 @@ int32_t wwn_iomfb_platform_acquire(
         return EINVAL;
     }
     WWNIOMFBPlatformSession *session =
-        (__bridge WWNIOMFBPlatformSession *)opaque;
+        (WWNIOMFBPlatformSession *)opaque;
     IOSurfaceRef surface = session->surfaces[index];
     if (!surface) return ENODEV;
     *out_surface = (WwnIomfbSurface){
@@ -348,7 +368,7 @@ int32_t wwn_iomfb_platform_present_surface(
     uint64_t frame) {
     if (!opaque || !surface_pointer) return EINVAL;
     WWNIOMFBPlatformSession *session =
-        (__bridge WWNIOMFBPlatformSession *)opaque;
+        (WWNIOMFBPlatformSession *)opaque;
     IOSurfaceRef surface = (IOSurfaceRef)surface_pointer;
     return present_surface(
         session, surface, damage, frame, "iosurface-direct", "zero");
@@ -365,7 +385,7 @@ int32_t wwn_iomfb_platform_present_texture(
         return EINVAL;
     }
     WWNIOMFBPlatformSession *session =
-        (__bridge WWNIOMFBPlatformSession *)opaque;
+        (WWNIOMFBPlatformSession *)opaque;
     id<MTLTexture> source = (__bridge id<MTLTexture>)texture_pointer;
     if (source.iosurface) {
         return present_surface(
@@ -404,19 +424,19 @@ int32_t wwn_iomfb_platform_present_texture(
 int32_t wwn_iomfb_platform_set_exclusive(void *opaque, int32_t exclusive) {
     if (!opaque) return EINVAL;
     WWNIOMFBPlatformSession *session =
-        (__bridge WWNIOMFBPlatformSession *)opaque;
-    BOOL want = exclusive != 0;
+        (WWNIOMFBPlatformSession *)opaque;
+    bool want = exclusive != 0;
     if (session->exclusive == want) {
         return 0;
     }
     session->exclusive = want;
     if (want) {
         if (!session->holdRunning) {
-            session->holdRunning = YES;
+            session->holdRunning = true;
             if (pthread_create(&session->holdThread, NULL, wwn_iomfb_hold_main,
                                (__bridge void *)session) != 0) {
-                session->holdRunning = NO;
-                session->exclusive = NO;
+                session->holdRunning = false;
+                session->exclusive = false;
                 return EAGAIN;
             }
         }
@@ -425,7 +445,7 @@ int32_t wwn_iomfb_platform_set_exclusive(void *opaque, int32_t exclusive) {
     }
     if (session->holdRunning) {
         pthread_join(session->holdThread, NULL);
-        session->holdRunning = NO;
+        session->holdRunning = false;
     }
     os_log(OS_LOG_DEFAULT, "wwn.iomfb op=exclusive result=off");
     return 0;
@@ -434,7 +454,7 @@ int32_t wwn_iomfb_platform_set_exclusive(void *opaque, int32_t exclusive) {
 int32_t wwn_iomfb_platform_restore(void *opaque) {
     if (!opaque) return EINVAL;
     WWNIOMFBPlatformSession *session =
-        (__bridge WWNIOMFBPlatformSession *)opaque;
+        (WWNIOMFBPlatformSession *)opaque;
     if (session->restored) return 0;
     (void)wwn_iomfb_platform_set_exclusive(opaque, 0);
     if (session->powerSave) {
@@ -461,7 +481,7 @@ int32_t wwn_iomfb_platform_restore(void *opaque) {
                 session->display, token, WWN_IOMFB_WAIT_UNTIL_DISPLAYED);
         }
     }
-    session->restored = YES;
+    session->restored = true;
     os_log(OS_LOG_DEFAULT,
            "wwn.iomfb op=restore result=%{public}d/%{public}d/%{public}d",
            begin, set, end);
@@ -471,6 +491,5 @@ int32_t wwn_iomfb_platform_restore(void *opaque) {
 }
 
 void wwn_iomfb_platform_destroy(void *opaque) {
-    if (!opaque) return;
-    CFBridgingRelease(opaque);
+    wwn_iomfb_session_destroy((WWNIOMFBPlatformSession *)opaque);
 }

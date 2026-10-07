@@ -1,4 +1,4 @@
-add_executable(amfiexceptiond src/exception.m)
+add_executable(amfiexceptiond src/exception.c)
 
 target_compile_options(amfiexceptiond PRIVATE
   -Wall -Wextra

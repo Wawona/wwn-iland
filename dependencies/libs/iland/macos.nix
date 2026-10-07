@@ -107,8 +107,8 @@ pkgs.stdenv.mkDerivation {
 
     OBJS=""
     for src in \
-      shims/drm/displaysurface/src/DisplaySurface.m \
-      shims/gbm/src/gbm.m \
+      shims/drm/displaysurface/src/DisplaySurface.c \
+      shims/gbm/src/gbm.c \
       shims/drm/drm/src/drm.c \
       shims/drm/drm/src/drm_linux.c \
       shims/drm/drm/src/drm_ioctl.c \
